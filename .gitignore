@@ -19,3 +19,9 @@ coverage.html
 *.db-journal
 *.db-wal
 *.db-shm
+
+# tests-live runtime byproducts (scenario workdirs, failure snapshots,
+# locally built node binary)
+clients/go/tests-live/runtime/
+clients/go/tests-live/failures/
+clients/go/bin/

@@ -1,6 +1,7 @@
 /* murmur kv - see kv.h. */
 #include "kv.h"
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,26 @@
 #include "config.h"
 #include "schema.h"
 #include "sqlite3.h"
+
+static pthread_mutex_t writer_mu;
+static pthread_once_t writer_once = PTHREAD_ONCE_INIT;
+
+static void writer_init(void) {
+  pthread_mutexattr_t at;
+  pthread_mutexattr_init(&at);
+  pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&writer_mu, &at);
+  pthread_mutexattr_destroy(&at);
+}
+
+void murmur_db_writer_lock(void) {
+  pthread_once(&writer_once, writer_init);
+  pthread_mutex_lock(&writer_mu);
+}
+
+void murmur_db_writer_unlock(void) {
+  pthread_mutex_unlock(&writer_mu);
+}
 
 static void set_sqlrc(int *sqlrc, int rc) {
   if (sqlrc) {
@@ -505,17 +526,21 @@ static murmur_sync_status_t exec_sql(sqlite3 *db, const char *sql, int *sqlrc) {
 murmur_sync_status_t murmur_kv_commit(sqlite3 *db,
                                       const murmur_kv_record_t *records,
                                       size_t n, int *sqlrc) {
+  murmur_db_writer_lock();
   murmur_sync_status_t st = exec_sql(db, "BEGIN", sqlrc);
   if (st != MURMUR_SYNC_OK) {
+    murmur_db_writer_unlock();
     return st;
   }
   st = murmur_kv_apply(db, records, n, sqlrc);
   if (st != MURMUR_SYNC_OK) {
     int dummy = 0;
     exec_sql(db, "ROLLBACK", &dummy);
+    murmur_db_writer_unlock();
     return st;
   }
   st = exec_sql(db, "COMMIT", sqlrc);
+  murmur_db_writer_unlock();
   if (st != MURMUR_SYNC_OK) {
     return st;
   }
@@ -836,8 +861,10 @@ murmur_sync_status_t murmur_backend_apply(sqlite3 *db, const uint8_t **payloads,
                                           const size_t *payload_lens, size_t np,
                                           const murmur_kv_record_t *records,
                                           size_t nr, int *sqlrc) {
+  murmur_db_writer_lock();
   murmur_sync_status_t st = exec_sql(db, "BEGIN IMMEDIATE", sqlrc);
   if (st != MURMUR_SYNC_OK) {
+    murmur_db_writer_unlock();
     return st;
   }
   for (size_t i = 0; i < np; i++) {
@@ -845,6 +872,7 @@ murmur_sync_status_t murmur_backend_apply(sqlite3 *db, const uint8_t **payloads,
     if (st != MURMUR_SYNC_OK) {
       int dummy = 0;
       exec_sql(db, "ROLLBACK", &dummy);
+      murmur_db_writer_unlock();
       return st;
     }
   }
@@ -852,9 +880,11 @@ murmur_sync_status_t murmur_backend_apply(sqlite3 *db, const uint8_t **payloads,
   if (st != MURMUR_SYNC_OK) {
     int dummy = 0;
     exec_sql(db, "ROLLBACK", &dummy);
+    murmur_db_writer_unlock();
     return st;
   }
   st = exec_sql(db, "COMMIT", sqlrc);
+  murmur_db_writer_unlock();
   if (st != MURMUR_SYNC_OK) {
     return st;
   }

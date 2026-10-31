@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "config.h"
 #include "engine.h"
@@ -4232,6 +4233,81 @@ static void test_serve_pull(void) {
   close_crr(dc);
 }
 
+/* Multi-batch pull: >1024 cells force paged batches whose next cursor
+ * carries an after resume key. Apply re-encodes that cursor into
+ * progress; the key borrows the reply buffer, so freeing the reply
+ * first stores heap garbage that fails every later pull (log-boundedness
+ * one-directional stall). Under ASan the use-after-free reports here. */
+static void test_serve_pull_multibatch(void) {
+  sqlite3 *da = open_crr();
+  sqlite3 *db = open_crr();
+  if (!da || !db) {
+    if (da) {
+      close_crr(da);
+    }
+    if (db) {
+      close_crr(db);
+    }
+    return;
+  }
+  make_sync_table(da, "t");
+  make_sync_table(db, "t");
+  for (int i = 0; i < 2000; i++) {
+    char sql[64];
+    snprintf(sql, sizeof(sql), "INSERT INTO t VALUES(%d,'r%d');", i, i);
+    exec_ok(da, sql, "bulk rows");
+  }
+  murmur_node_t group = node_fill(7);
+  murmur_node_t na = node_fill(0xA0);
+  murmur_node_t sa = node_fill(0xA1);
+  murmur_node_t nb = node_fill(0xB0);
+  murmur_node_t sb = node_fill(0xB1);
+  murmur_engine_t ea, eb;
+  engine_test_init(&ea, da, &group, &na, &sa, 11, "127.0.0.1:1111");
+  engine_test_init(&eb, db, &group, &nb, &sb, 22, "127.0.0.1:2222");
+  mempair_t mp;
+  xfer_arg_t srv, cli;
+  mempair_init(&mp);
+  xfer_arg_init(&srv, &ea, &nb, &mp.a_io, 0);
+  xfer_arg_init(&cli, &eb, &na, &mp.b_io, 1);
+  pull_round(&srv, &cli);
+  free(srv.detail);
+  free(cli.detail);
+  mempair_destroy(&mp);
+  int rounds = 0;
+  for (;;) {
+    mempair_init(&mp);
+    xfer_arg_init(&srv, &ea, &nb, &mp.a_io, 0);
+    xfer_arg_init(&cli, &eb, &na, &mp.b_io, 1);
+    pull_round(&srv, &cli);
+    CHECK(srv.st == MURMUR_SYNC_OK, "multibatch serve %d", (int)srv.st);
+    CHECK(cli.st == MURMUR_SYNC_OK, "multibatch pull %d", (int)cli.st);
+    int more = cli.more;
+    free(srv.detail);
+    free(cli.detail);
+    mempair_destroy(&mp);
+    if (++rounds > 8 || !more) {
+      CHECK(!more, "multibatch drained");
+      break;
+    }
+  }
+  CHECK(count_rows(db, "SELECT COUNT(*) FROM t") == 2000, "multibatch rows");
+  CHECK(rounds > 1, "multibatch paged");
+  murmur_node_t psite;
+  int phas = 0;
+  murmur_stored_cursor_t pcur;
+  memset(&pcur, 0, sizeof(pcur));
+  int prc = 0;
+  CHECK(murmur_sync_progress(db, &na, &psite, &phas, &pcur, &prc) ==
+            MURMUR_SYNC_OK,
+        "multibatch progress decodes");
+  murmur_sync_cursor_free(&pcur);
+  murmur_engine_destroy(&ea);
+  murmur_engine_destroy(&eb);
+  close_crr(da);
+  close_crr(db);
+}
+
 /* Loopback session: open_stream mints a pipe pair and queues the
  * server end for a donor serve thread. */
 typedef struct {
@@ -4658,6 +4734,114 @@ static void test_serve_schema(void) {
   close_crr(db);
 }
 
+typedef struct {
+  sqlite3 *db;
+  pthread_barrier_t *bar;
+  murmur_sync_status_t st;
+  int sqlrc;
+} conc_arg_t;
+
+static void *conc_commit_thread(void *v) {
+  conc_arg_t *a = (conc_arg_t *)v;
+  pthread_barrier_wait(a->bar);
+  static const uint8_t k[] = "conc/k";
+  static const uint8_t val[] = "v";
+  murmur_kv_record_t r;
+  memset(&r, 0, sizeof(r));
+  r.key = (uint8_t *)k;
+  r.key_len = sizeof(k) - 1;
+  r.value = (uint8_t *)val;
+  r.value_len = sizeof(val) - 1;
+  a->st = murmur_kv_commit(a->db, &r, 1, &a->sqlrc);
+  return NULL;
+}
+
+typedef struct {
+  sqlite3 *db;
+  int base;
+  int n;
+  int fails;
+} hammer_arg_t;
+
+static void *conc_hammer_thread(void *v) {
+  hammer_arg_t *a = (hammer_arg_t *)v;
+  for (int i = 0; i < a->n; i++) {
+    char kb[32];
+    snprintf(kb, sizeof(kb), "conc/h%d/%d", a->base, i);
+    murmur_kv_record_t r;
+    memset(&r, 0, sizeof(r));
+    r.key = (uint8_t *)kb;
+    r.key_len = strlen(kb);
+    static const uint8_t val[] = "v";
+    r.value = (uint8_t *)val;
+    r.value_len = 1;
+    int sqlrc = 0;
+    if (murmur_kv_commit(a->db, &r, 1, &sqlrc) != MURMUR_SYNC_OK) {
+      a->fails++;
+    }
+  }
+  return NULL;
+}
+
+/* Two threads sharing one handle must serialize write transactions: without
+ * the writer guard the loser's BEGIN fails with "cannot start a transaction
+ * within a transaction" (the log-boundedness snapshot stall). */
+static void test_concurrent_txn(void) {
+  sqlite3 *db = open_crr();
+  if (!db) {
+    return;
+  }
+  pthread_barrier_t bar;
+  pthread_barrier_init(&bar, NULL, 2);
+  conc_arg_t a;
+  memset(&a, 0, sizeof(a));
+  a.db = db;
+  a.bar = &bar;
+  a.st = MURMUR_SYNC_OVERLOADED;
+  murmur_db_writer_lock();
+  CHECK(sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK,
+        "raw begin");
+  pthread_t t;
+  pthread_create(&t, NULL, conc_commit_thread, &a);
+  pthread_barrier_wait(&bar);
+  struct timespec ts;
+  ts.tv_sec = 0;
+  ts.tv_nsec = 200 * 1000 * 1000;
+  nanosleep(&ts, NULL);
+  CHECK(sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK,
+        "raw commit");
+  murmur_db_writer_unlock();
+  pthread_join(t, NULL);
+  pthread_barrier_destroy(&bar);
+  CHECK(a.st == MURMUR_SYNC_OK, "concurrent kv_commit st=%d sqlrc=%d",
+        (int)a.st, a.sqlrc);
+  uint8_t *got = NULL;
+  size_t got_len = 0;
+  int found = 0, sqlrc = 0;
+  static const uint8_t kk[] = "conc/k";
+  CHECK(murmur_kv_get(db, kk, sizeof(kk) - 1, &got, &got_len, &found,
+                      &sqlrc) == MURMUR_SYNC_OK &&
+            found && got_len == 1 && got[0] == 'v',
+        "concurrent value landed");
+  free(got);
+  hammer_arg_t ha[4];
+  pthread_t ht[4];
+  for (int i = 0; i < 4; i++) {
+    ha[i].db = db;
+    ha[i].base = i;
+    ha[i].n = 50;
+    ha[i].fails = 0;
+    pthread_create(&ht[i], NULL, conc_hammer_thread, &ha[i]);
+  }
+  int fails = 0;
+  for (int i = 0; i < 4; i++) {
+    pthread_join(ht[i], NULL);
+    fails += ha[i].fails;
+  }
+  CHECK(fails == 0, "hammer fails=%d", fails);
+  sqlite3_close(db);
+}
+
 int main(void) {
   test_export_roundtrip();
   test_export_paginates();
@@ -4691,8 +4875,10 @@ int main(void) {
   test_serve_snapshot();
   test_serve_request();
   test_serve_schema();
+  test_concurrent_txn();
+  test_serve_pull_multibatch();
   if (failures == 0) {
-    printf("SYNC-OK (32 suites)\n");
+    printf("SYNC-OK (34 suites)\n");
     return 0;
   }
   printf("SYNC-FAIL (%d)\n", failures);

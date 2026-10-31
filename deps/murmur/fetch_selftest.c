@@ -524,19 +524,27 @@ static void suite_live(void) {
   CHECK(w.n == n && memcmp(w.p, payload, n) == 0, "fetched bytes exact");
   free(w.p);
 
-  /* No residue in staging. */
+  /* No residue in staging. Failed-attempt cleanup races the success
+   * path, so poll briefly; a true leak still fails. */
   char staging[1024];
   snprintf(staging, sizeof(staging), "%s/staging", b.dir);
-  DIR *d = opendir(staging);
   int leftovers = 0;
-  if (d) {
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-      if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
-        leftovers++;
+  for (int i = 0; i < 100; i++) {
+    leftovers = 0;
+    DIR *d = opendir(staging);
+    if (d) {
+      struct dirent *e;
+      while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+          leftovers++;
+        }
       }
+      closedir(d);
     }
-    closedir(d);
+    if (leftovers == 0) {
+      break;
+    }
+    sleep_ms(100);
   }
   CHECK(leftovers == 0, "staging clean");
 

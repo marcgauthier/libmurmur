@@ -34,6 +34,15 @@ typedef struct {
 
 void murmur_kv_record_free(murmur_kv_record_t *r);
 
+/* Process-wide recursive writer guard for SQLite handles shared by engine
+ * workers and application SQL threads. Every multi-statement write
+ * transaction (kv_commit, backend_apply, sync export/apply) must run under
+ * this lock; single autocommit application statements should too so they
+ * cannot join (and be rolled back with) an engine transaction. Recursive so
+ * nested commit helpers on one thread cannot self-deadlock. */
+void murmur_db_writer_lock(void);
+void murmur_db_writer_unlock(void);
+
 /* One value; *found false on missing (**val NULL then). */
 murmur_sync_status_t murmur_kv_get(sqlite3 *db, const uint8_t *key,
                                    size_t key_len, uint8_t **val,

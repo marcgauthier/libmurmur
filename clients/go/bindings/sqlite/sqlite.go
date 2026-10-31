@@ -17,6 +17,9 @@ package sqlite
 #include <string.h>
 #include "../../../../deps/sqlite/sqlite3.h"
 
+void murmur_db_writer_lock(void);
+void murmur_db_writer_unlock(void);
+
 static sqlite3_destructor_type goTransient(void) { return SQLITE_TRANSIENT; }
 */
 import "C"
@@ -68,6 +71,26 @@ func errOf(db *C.sqlite3, rc C.int) error {
 	}
 }
 
+// LockWriter serializes the caller against native engine write
+// transactions on handles shared with engine workers. The pthread
+// guard is thread-scoped, so the goroutine stays pinned for the
+// hold; pairing UnlockWriter via defer is mandatory. Nesting is
+// safe (pinning nests and the C mutex is recursive).
+func LockWriter() {
+	runtime.LockOSThread()
+	C.murmur_db_writer_lock()
+}
+
+// UnlockWriter releases a hold acquired by LockWriter.
+func UnlockWriter() {
+	C.murmur_db_writer_unlock()
+	runtime.UnlockOSThread()
+}
+
+func lockDB() { LockWriter() }
+
+func unlockDB() { UnlockWriter() }
+
 // Conn is an open SQLite database connection.
 type Conn struct {
 	db *C.sqlite3
@@ -91,6 +114,32 @@ func Open(path string, flags int) (*Conn, error) {
 		return nil, &Error{Code: int(rc), Msg: msg}
 	}
 	return &Conn{db: db}, nil
+}
+
+// OpenVFS opens the database at path with the given Open* flags
+// through the named VFS (e.g. "sqlite-murmur" for murmur stores).
+func OpenVFS(path string, flags int, vfs string) (*Conn, error) {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	cvfs := C.CString(vfs)
+	defer C.free(unsafe.Pointer(cvfs))
+	var db *C.sqlite3
+	rc := C.sqlite3_open_v2(cpath, &db, C.int(flags), cvfs)
+	if rc != C.SQLITE_OK {
+		msg := ""
+		if db != nil {
+			msg = C.GoString(C.sqlite3_errmsg(db))
+			C.sqlite3_close(db)
+		}
+		return nil, &Error{Code: int(rc), Msg: msg}
+	}
+	return &Conn{db: db}, nil
+}
+
+// NativeDB exposes the raw sqlite3 handle for native subsystems
+// (replication engine/driver) that borrow the connection.
+func (c *Conn) NativeDB() unsafe.Pointer {
+	return unsafe.Pointer(c.db)
 }
 
 // Close closes the connection. All statements must be finalized first.
@@ -117,6 +166,8 @@ func (c *Conn) Close() error {
 
 // Exec runs one or more statements that return no rows.
 func (c *Conn) Exec(sql string) error {
+	lockDB()
+	defer unlockDB()
 	csql := C.CString(sql)
 	defer C.free(unsafe.Pointer(csql))
 	var errmsg *C.char
@@ -165,6 +216,31 @@ func (c *Conn) Prepare(sql string) (*Stmt, error) {
 	return &Stmt{db: c.db, s: s, mu: mu}, nil
 }
 
+// PrepareTail compiles the first statement of sql and returns the
+// uncompiled remainder, so callers can run multi-statement scripts
+// statement by statement. A nil Stmt means the head held no statement
+// (blank text, bare semicolons, or comments); keep calling while the
+// remainder is non-blank.
+func (c *Conn) PrepareTail(sql string) (*Stmt, string, error) {
+	csql := C.CString(sql)
+	defer C.free(unsafe.Pointer(csql))
+	var s *C.sqlite3_stmt
+	var tail *C.char
+	if rc := C.sqlite3_prepare_v2(c.db, csql, -1, &s, &tail); rc != C.SQLITE_OK {
+		return nil, "", errOf(c.db, rc)
+	}
+	var rest string
+	if tail != nil {
+		rest = C.GoString(tail)
+	}
+	if s == nil {
+		return nil, rest, nil
+	}
+	mu := make(chan struct{}, 1)
+	mu <- struct{}{}
+	return &Stmt{db: c.db, s: s, mu: mu}, rest, nil
+}
+
 func (s *Stmt) lock() {
 	<-s.mu
 }
@@ -204,6 +280,8 @@ func (s *Stmt) Reset() error {
 func (s *Stmt) Step() (done bool, err error) {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	if s.pending {
 		return false, fmt.Errorf("sqlite.Step: unconsumed StepRows row current; call StepRows")
 	}

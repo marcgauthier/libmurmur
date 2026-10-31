@@ -461,9 +461,9 @@ static int health_triple(sqlite3 *db, uint64_t *local, uint64_t *debt,
       return 0;
     }
     uint64_t v = 0;
-    int ok = murmur_cfg_atoi(raw, &v);
+    int bad = murmur_cfg_atoi(raw, &v) != 0;
     free(raw);
-    if (!ok) {
+    if (bad) {
       return 0;
     }
     *slots[i] = v;
@@ -783,6 +783,26 @@ char *murmur_engine_peers(murmur_engine_t *e) {
         }
       }
       jem_emit(&b, &first, m, connected);
+    }
+    /* Union with the transport conn table (reference parity: SHOW
+     * PEERS iterates conns, not the gossip view). A freshly dialed
+     * peer is connected before SWIM learns it; without this row the
+     * peer count reads 0 until the first gossip round. */
+    if (conns) {
+      for (size_t k = 0; k < n_conns; k++) {
+        int known = murmur_node_eq(&conns[k], &local_copy.node);
+        for (size_t i = 0; i < n && !known; i++) {
+          known = murmur_node_eq(&conns[k], &members[i].node);
+        }
+        if (known) {
+          continue;
+        }
+        murmur_member_t synth;
+        memset(&synth, 0, sizeof(synth));
+        synth.node = conns[k];
+        synth.state = (murmur_state_t)99; /* renders "unknown" */
+        jem_emit(&b, &first, &synth, 1);
+      }
     }
   }
   if (first) {

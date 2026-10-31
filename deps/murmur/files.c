@@ -860,6 +860,16 @@ static char **dir_names(const char *dir, size_t *n_out) {
   }
   closedir(d);
   *n_out = n;
+  if (!names) {
+    /* Empty directory: return a non-NULL empty list so callers can
+     * keep reading NULL as failure (opendir error or ENOMEM, both
+     * with errno set). A NULL success here used to surface stale
+     * errno (EEXIST from mkdir_all) as "File exists" on reopen. */
+    names = malloc(sizeof(*names));
+    if (!names) {
+      return NULL;
+    }
+  }
   return names;
 }
 

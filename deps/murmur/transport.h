@@ -94,6 +94,8 @@ int murmur_session_close(murmur_session_t* s); /* ordered close, code 0 */
 int murmur_session_close_code(
     murmur_session_t* s, uint64_t code); /* ordered close, given code */
 void murmur_session_release(murmur_session_t* s); /* drop handle ref */
+murmur_session_t* murmur_session_acquire(
+    murmur_session_t* s); /* add handle ref; NULL on NULL/dead */
 /* Peer's "ip:port" (pump-thread read, race-free). 0, or negative. */
 int murmur_session_remote_addr(
     murmur_session_t* s, char* buf, size_t buflen);

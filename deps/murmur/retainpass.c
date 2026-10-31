@@ -97,6 +97,7 @@ murmur_sync_status_t murmur_collect_floors(sqlite3 *db,
   uint8_t **owned = NULL;
   size_t nowned = 0, cap_owned = 0;
   uint64_t nmoved = 0;
+  uint64_t npruned = 0;
   for (size_t h = 0; h < n_heads && s == MURMUR_SYNC_OK; h++) {
     int have_recorded = 0;
     uint64_t recorded = 0;
@@ -164,6 +165,7 @@ murmur_sync_status_t murmur_collect_floors(sqlite3 *db,
       free(fkey);
       continue;
     }
+    npruned += floor - prev;
     size_t ovl = 0;
     uint8_t *ov = murmur_tx_encode_u64(floor, &ovl);
     murmur_tx_progress_t retained = heads[h];
@@ -257,21 +259,54 @@ murmur_sync_status_t murmur_collect_floors(sqlite3 *db,
   if (s != MURMUR_SYNC_OK) {
     return s;
   }
-  /* the collection stamp lands even when no floor moved */
+  /* the collection stamp lands even when no floor moved; the pruned
+   * total advances by this pass's released transactions */
   static const uint8_t last[] = "07/replication/retention/last";
+  static const uint8_t collected[] = "07/replication/retention/collected";
   size_t el = 0;
   uint8_t *enc = murmur_tx_encode_u64(now_millis, &el);
   if (!enc) {
     return sqlite_fail(sqlrc, SQLITE_NOMEM);
   }
-  murmur_kv_record_t stamp;
-  memset(&stamp, 0, sizeof(stamp));
-  stamp.key = (uint8_t *)last;
-  stamp.key_len = sizeof(last) - 1;
-  stamp.value = enc;
-  stamp.value_len = el;
-  s = murmur_kv_commit(db, &stamp, 1, sqlrc);
+  uint64_t total = npruned;
+  uint8_t *craw = NULL;
+  size_t craw_len = 0;
+  int cfound = 0;
+  s = murmur_kv_get(db, collected, sizeof(collected) - 1, &craw, &craw_len,
+                    &cfound, sqlrc);
+  if (s != MURMUR_SYNC_OK) {
+    free(enc);
+    return s;
+  }
+  if (cfound) {
+    uint64_t prev_total = 0;
+    s = murmur_tx_decode_u64(craw, craw_len, &prev_total, sqlrc);
+    free(craw);
+    if (s != MURMUR_SYNC_OK) {
+      free(enc);
+      return s;
+    }
+    total += prev_total;
+  }
+  size_t cl = 0;
+  uint8_t *cenc = murmur_tx_encode_u64(total, &cl);
+  if (!cenc) {
+    free(enc);
+    return sqlite_fail(sqlrc, SQLITE_NOMEM);
+  }
+  murmur_kv_record_t stamp[2];
+  memset(stamp, 0, sizeof(stamp));
+  stamp[0].key = (uint8_t *)last;
+  stamp[0].key_len = sizeof(last) - 1;
+  stamp[0].value = enc;
+  stamp[0].value_len = el;
+  stamp[1].key = (uint8_t *)collected;
+  stamp[1].key_len = sizeof(collected) - 1;
+  stamp[1].value = cenc;
+  stamp[1].value_len = cl;
+  s = murmur_kv_commit(db, stamp, 2, sqlrc);
   free(enc);
+  free(cenc);
   if (s != MURMUR_SYNC_OK) {
     return s;
   }

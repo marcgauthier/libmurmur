@@ -28,7 +28,8 @@ PIC      := -fPIC
 DEPFLAGS := -MMD -MP
 
 SQLITE_DEFS := -DSQLITE_ENABLE_FTS5 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_PREUPDATE_HOOK=1
-PQ_DEFS     := -DPTLS_WITHOUT_OPENSSL -DPTLS_WITHOUT_FUSION -DPICOQUIC_WITH_MBEDTLS
+PQ_DEFS     := -DPTLS_WITHOUT_OPENSSL -DPTLS_WITHOUT_FUSION -DPICOQUIC_WITH_MBEDTLS \
+               -DMBEDTLS_THREADING_C -DMBEDTLS_THREADING_PTHREAD
 ZSTD_DEFS   := -DZSTD_DISABLE_ASM=1
 
 INC_SQLITE := -Ideps/sqlite
@@ -50,6 +51,10 @@ INC_NATIVE := -Ideps/murmur -Ideps/codec -Ideps/keyring \
 ifdef MURMUR_VFS_STATS
 MURMUR_DEFS := -DMURMUR_VFS_STATS=1
 endif
+# mbedTLS threading: concurrent QUIC handshakes race in PSA globals
+# without it (ASan-proven PSA-slot UAF in three-way-heal). transport.cc
+# includes mbedtls headers, so murmur TUs need the same defines.
+MURMUR_DEFS += -DMBEDTLS_THREADING_C -DMBEDTLS_THREADING_PTHREAD
 
 SRC_SQLITE  := deps/sqlite/sqlite3.c
 # Single TU: the wrapper sources share extension statics (see wrapper_tu.c).
@@ -132,28 +137,28 @@ selftest: $(BUILD)/membertest $(BUILD)/framingtest $(BUILD)/msgcodectest \
 $(BUILD)/membertest: deps/murmur/member.c deps/murmur/member_selftest.c \
     deps/murmur/member.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
 	  deps/murmur/member_selftest.c -o $@
 
 $(BUILD)/framingtest: deps/murmur/member.c deps/murmur/framing.c \
     deps/murmur/framing_selftest.c deps/murmur/member.h \
     deps/murmur/framing.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
 	  deps/murmur/framing.c deps/murmur/framing_selftest.c -o $@
 
 $(BUILD)/msgcodectest: deps/murmur/member.c deps/murmur/msgcodec.c \
     deps/murmur/msgcodec_selftest.c deps/murmur/member.h \
     deps/murmur/msgcodec.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur deps/murmur/member.c \
 	  deps/murmur/msgcodec.c deps/murmur/msgcodec_selftest.c -o $@
 
 $(BUILD)/filecodectest: deps/murmur/member.c deps/murmur/msgcodec.c \
     deps/murmur/postcard.c deps/murmur/filecodec.c \
     deps/murmur/filecodec_selftest.c
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
 	  deps/murmur/member.c deps/murmur/msgcodec.c deps/murmur/postcard.c \
 	  deps/murmur/filecodec.c deps/murmur/filecodec_selftest.c -o $@
 
@@ -162,7 +167,7 @@ $(BUILD)/filecodectest: deps/murmur/member.c deps/murmur/msgcodec.c \
 $(BUILD)/synctest: $(LIB) deps/murmur/sync_selftest.c \
     deps/murmur/sync.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include \
 	  deps/murmur/sync_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -172,7 +177,7 @@ $(BUILD)/synctest: $(LIB) deps/murmur/sync_selftest.c \
 $(BUILD)/aestest: $(LIB) deps/codec/aesgcm_selftest.c \
     deps/codec/aesgcm.h deps/codec/murmur_codec.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/codec \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/codec \
 	  deps/codec/aesgcm_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
 
@@ -181,7 +186,7 @@ $(BUILD)/aestest: $(LIB) deps/codec/aesgcm_selftest.c \
 $(BUILD)/drivertest: $(LIB) deps/murmur/driver_selftest.c \
     deps/murmur/driver.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include \
 	  deps/murmur/driver_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -191,7 +196,7 @@ $(BUILD)/drivertest: $(LIB) deps/murmur/driver_selftest.c \
 $(BUILD)/filestest: $(LIB) deps/murmur/files_selftest.c \
     deps/murmur/files.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/codec -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/codec -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include \
 	  deps/murmur/files_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -201,7 +206,7 @@ $(BUILD)/filestest: $(LIB) deps/murmur/files_selftest.c \
 $(BUILD)/fetchtest: $(LIB) deps/murmur/fetch_selftest.c \
     deps/murmur/fetch.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/codec -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/codec -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include -Ideps/mbedtls/include \
 	  deps/murmur/fetch_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -211,7 +216,7 @@ $(BUILD)/fetchtest: $(LIB) deps/murmur/fetch_selftest.c \
 $(BUILD)/vectest: deps/vec0/vec0.c deps/vec0/vec0_selftest.c \
     deps/vec0/vec0.h deps/sqlite/sqlite3.c deps/sqlite/sqlite3.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Wno-unused-function -Ideps/vec0 -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Wno-unused-function -Ideps/vec0 -Ideps/sqlite \
 	  $(SQLITE_DEFS) \
 	  deps/vec0/vec0.c deps/sqlite/sqlite3.c deps/vec0/vec0_selftest.c \
 	  -lm -ldl -lpthread -o $@
@@ -221,7 +226,7 @@ $(BUILD)/vectest: deps/vec0/vec0.c deps/vec0/vec0_selftest.c \
 $(BUILD)/searchtest: $(LIB) deps/murmur/search_selftest.c \
     deps/murmur/search.h
 	@mkdir -p $(BUILD)
-	$(CC) -O1 -g -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include -Ideps/vec0 \
 	  deps/murmur/search_selftest.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -230,7 +235,7 @@ $(BUILD)/searchtest: $(LIB) deps/murmur/search_selftest.c \
 # Murmur store with no Go involved. See clients/c/demo/README.md.
 $(BUILD)/demo: $(LIB) clients/c/demo/demo.c libmurmur.h
 	@mkdir -p $(BUILD)
-	$(CC) -O2 -g -Wall -Wextra -I. -Ideps/murmur -Ideps/sqlite \
+	$(CC) $(OPT) -Wall -Wextra -I. -Ideps/murmur -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include \
 	  clients/c/demo/demo.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
@@ -245,7 +250,7 @@ democheck: $(BUILD)/demo
 $(BUILD)/admin: $(LIB) clients/c/admin/admin.c libmurmur.h \
     deps/murmur/store.h
 	@mkdir -p $(BUILD)
-	$(CC) -O2 -g -Wall -Wextra -I. -Ideps -Ideps/murmur -Ideps/keyring \
+	$(CC) $(OPT) -Wall -Wextra -I. -Ideps -Ideps/murmur -Ideps/keyring \
 	  -Ideps/sqlite \
 	  clients/c/admin/admin.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@

@@ -6,9 +6,28 @@
 #include "sync.h"
 
 #include "config.h"
+#include "kv.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int apply_dbg_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    v = getenv("MURMUR_DEBUG_SYNC") != NULL;
+  }
+  return v;
+}
+
+#define APPLY_DBG(...)                                   \
+  do {                                                   \
+    if (apply_dbg_on()) {                                \
+      fprintf(stderr, "murmur-apply: ");                 \
+      fprintf(stderr, __VA_ARGS__);                      \
+      fprintf(stderr, "\n");                             \
+    }                                                    \
+  } while (0)
 
 #include "sha256.h"
 #include "sqlite3.h"
@@ -317,6 +336,7 @@ murmur_sync_status_t murmur_sync_ingest_blob(sqlite3 *db,
   rc = sqlite3_step(st);
   sqlite3_finalize(st);
   if (rc == SQLITE_DONE) {
+    APPLY_DBG("ingest-done len=%zu", len);
     return MURMUR_SYNC_PROTOCOL;
   }
   return rc == SQLITE_ROW ? ok_rc(sqlrc) : sqlite_fail(sqlrc, rc);
@@ -436,6 +456,17 @@ murmur_sync_status_t murmur_sync_progress(sqlite3 *db,
   sqlite3_finalize(st);
   if (murmur_cursor_decode(copy, (size_t)cur_len, &cur->cursor) !=
       MURMUR_OK) {
+    if (apply_dbg_on()) {
+      char hx[256];
+      size_t hn = 0;
+      static const char *d = "0123456789abcdef";
+      for (int i = 0; i < cur_len && hn + 2 < sizeof(hx); i++) {
+        hx[hn++] = d[(copy[i] >> 4) & 15];
+        hx[hn++] = d[copy[i] & 15];
+      }
+      hx[hn] = '\0';
+      APPLY_DBG("progress-decode-fail len=%d hex=%s", cur_len, hx);
+    }
     free(copy);
     return MURMUR_SYNC_PROTOCOL;
   }
@@ -539,8 +570,10 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
       after_bad) {
     return MURMUR_SYNC_PROTOCOL;
   }
+  murmur_db_writer_lock();
   int rc = sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
   if (rc != SQLITE_OK) {
+    murmur_db_writer_unlock();
     return sqlite_fail(sqlrc, rc);
   }
   int committed = 0;
@@ -811,6 +844,7 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
     last_arena = NULL;
   }
   murmur_cfg_table_flags_free(&flags);
+  murmur_db_writer_unlock();
   set_sqlrc(sqlrc, fail_rc);
   return MURMUR_SYNC_OK;
 
@@ -821,6 +855,7 @@ rollback:
   if (!committed) {
     sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
   }
+  murmur_db_writer_unlock();
   murmur_cfg_table_flags_free(&flags);
   free(blob);
   free(last_arena);
@@ -851,6 +886,10 @@ murmur_sync_status_t murmur_sync_apply(
   }
   if (!has_site || memcmp(stored_site.b, site->b, 16) != 0 ||
       !cursor_equal(&stored.cursor, previous)) {
+    APPLY_DBG("cursor-mismatch has_site=%d site_eq=%d prev_from=%lld "
+              "stored_from=%lld",
+              has_site, memcmp(stored_site.b, site->b, 16) == 0,
+              (long long)previous->from, (long long)stored.cursor.from);
     murmur_sync_cursor_free(&stored);
     set_sqlrc(sqlrc, SQLITE_OK);
     return MURMUR_SYNC_PROTOCOL;
@@ -880,6 +919,7 @@ murmur_sync_status_t murmur_sync_apply(
     }
     int64_t idx = sqlite3_column_int64(st, 0);
     if (idx < 0 || idx != index) {
+      APPLY_DBG("stage-index idx=%lld want=%u", (long long)idx, index);
       sqlite3_finalize(st);
       free(blob);
       set_sqlrc(sqlrc, SQLITE_OK);
@@ -888,6 +928,8 @@ murmur_sync_status_t murmur_sync_apply(
     const uint8_t *data = sqlite3_column_blob(st, 1);
     size_t data_len = (size_t)sqlite3_column_bytes(st, 1);
     if (data_len > length || blob_len > length - data_len) {
+      APPLY_DBG("stage-overflow data=%zu blob=%zu len=%llu", data_len,
+                blob_len, (unsigned long long)length);
       sqlite3_finalize(st);
       free(blob);
       set_sqlrc(sqlrc, SQLITE_OK);
@@ -914,6 +956,8 @@ murmur_sync_status_t murmur_sync_apply(
   sqlite3_finalize(st);
   st = NULL;
   if ((uint64_t)blob_len != length) {
+    APPLY_DBG("length blob=%zu len=%llu", blob_len,
+              (unsigned long long)length);
     free(blob);
     set_sqlrc(sqlrc, SQLITE_OK);
     return MURMUR_SYNC_PROTOCOL;
@@ -921,6 +965,7 @@ murmur_sync_status_t murmur_sync_apply(
   uint8_t sum[32];
   murmur_sha256(blob, blob_len, sum);
   if (memcmp(sum, digest, 32) != 0) {
+    APPLY_DBG("digest blob=%zu", blob_len);
     free(blob);
     set_sqlrc(sqlrc, SQLITE_OK);
     return MURMUR_SYNC_PROTOCOL;
@@ -946,6 +991,7 @@ murmur_sync_status_t murmur_sync_apply(
               ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
     }
     if (blob_len < 12 || (uint64_t)count > (uint64_t)(blob_len - 12) + 1) {
+      APPLY_DBG("cell-count blob=%zu count=%u", blob_len, count);
       murmur_cfg_table_flags_free(&flags);
       free(blob);
       set_sqlrc(sqlrc, SQLITE_OK);
@@ -961,6 +1007,7 @@ murmur_sync_status_t murmur_sync_apply(
     }
     if (murmur_cells_decode(blob, blob_len, cells, count, &n) !=
         MURMUR_OK) {
+      APPLY_DBG("cell-decode blob=%zu count=%u", blob_len, count);
       free(cells);
       murmur_cfg_table_flags_free(&flags);
       free(blob);
@@ -989,6 +1036,7 @@ murmur_sync_status_t murmur_sync_apply(
       size_t nenc = murmur_cells_encode(cells, kept, filtered, blob_len);
       free(cells);
       if (nenc == 0) {
+        APPLY_DBG("cell-encode kept=%zu", kept);
         murmur_cfg_table_flags_free(&flags);
         free(filtered);
         free(blob);
@@ -1004,6 +1052,7 @@ murmur_sync_status_t murmur_sync_apply(
     }
   }
 
+  murmur_db_writer_lock();
   rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
   if (rc != SQLITE_OK) {
     status = sqlite_fail(&fail_rc, rc);
@@ -1107,6 +1156,7 @@ murmur_sync_status_t murmur_sync_apply(
   murmur_cfg_table_flags_free(&flags);
   free(filtered);
   free(blob);
+  murmur_db_writer_unlock();
   set_sqlrc(sqlrc, fail_rc);
   return MURMUR_SYNC_OK;
 
@@ -1119,6 +1169,7 @@ apply_fail:
   murmur_cfg_table_flags_free(&flags);
   free(filtered);
   free(blob);
+  murmur_db_writer_unlock();
   set_sqlrc(sqlrc, fail_rc);
   return status;
 }

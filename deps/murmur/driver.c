@@ -10,6 +10,7 @@
 #include "config.h"
 #include "member.h"
 #include "mbedtls/pem.h"
+#include "retain.h"
 #include "schema.h"
 #include "serve.h"
 #include "transport.h"
@@ -273,6 +274,19 @@ int murmur_driver_running(murmur_driver_t *d) {
   return r;
 }
 
+murmur_sync_status_t murmur_driver_retention_collect(murmur_driver_t *d,
+                                                     uint64_t *moved,
+                                                     uint64_t *pruned,
+                                                     int *sqlrc) {
+  if (!d || !d->eng) {
+    if (sqlrc) {
+      *sqlrc = 21; /* SQLITE_MISUSE */
+    }
+    return MURMUR_SYNC_INVALID;
+  }
+  return murmur_engine_retention_pass(d->eng, moved, pruned, sqlrc);
+}
+
 /* ---- session registry ---- */
 
 static murmur_driver_sess_t *reg_find(murmur_driver_t *d,
@@ -354,12 +368,36 @@ static int stream_write(void *ctx, const uint8_t *b, size_t n) {
   return 0;
 }
 
+/* Per-read silence budget: transfers stream continuously, so 30 s without
+ * a byte means the peer stalled mid-frame (never hang a sync/fetch worker
+ * forever; callers already reopen and resume). Overridable in ms via
+ * MURMUR_STREAM_READ_MS for mechanism tests. */
+#define DRIVER_STREAM_READ_MS 30000
+
+static int stream_read_ms(void) {
+  static int v = -1;
+  if (v < 0) {
+    v = DRIVER_STREAM_READ_MS;
+    const char *e = getenv("MURMUR_STREAM_READ_MS");
+    if (e && atoi(e) > 0) {
+      v = atoi(e);
+    }
+  }
+  return v;
+}
+
 static int stream_read_full(void *ctx, uint8_t *b, size_t n) {
   stream_ctx_t *c = (stream_ctx_t *)ctx;
   size_t got = 0;
   while (got < n) {
     size_t m = 0;
-    if (murmur_stream_read(c->st, b + got, n - got, &m) != 0) {
+    int rc = murmur_stream_read_timeout(c->st, b + got, n - got, &m,
+                                          stream_read_ms());
+    if (rc == -MURMUR_QUIC_TIMEOUT) {
+      snprintf(c->err, sizeof(c->err), "stream read timeout");
+      return 1;
+    }
+    if (rc != 0) {
       snprintf(c->err, sizeof(c->err), "stream read failed");
       return 1;
     }
@@ -390,13 +428,17 @@ static int sess_open_stream(void *ctx, murmur_stream_io_t *out) {
   murmur_driver_t *d = s->drv;
   pthread_mutex_lock(&d->mu);
   int dead = s->dead || !d->running;
-  murmur_session_t *qs = s->qs;
+  murmur_session_t *qs =
+      !dead ? murmur_session_acquire(s->qs) : NULL;
   pthread_mutex_unlock(&d->mu);
   if (dead || !qs) {
+    murmur_session_release(qs);
     return 1;
   }
   murmur_stream_t *st = NULL;
-  if (murmur_session_open_stream(qs, &st) != 0) {
+  int orc = murmur_session_open_stream(qs, &st);
+  murmur_session_release(qs);
+  if (orc != 0) {
     pthread_mutex_lock(&d->mu);
     if (d->quic) {
       murmur_last_error(d->quic, s->err, sizeof(s->err));
@@ -427,15 +469,16 @@ static int sess_send_datagram(void *ctx, const uint8_t *b, size_t n) {
   murmur_driver_t *d = s->drv;
   pthread_mutex_lock(&d->mu);
   int dead = s->dead || !d->running;
-  murmur_session_t *qs = s->qs;
+  murmur_session_t *qs =
+      !dead ? murmur_session_acquire(s->qs) : NULL;
   pthread_mutex_unlock(&d->mu);
   if (dead || !qs) {
+    murmur_session_release(qs);
     return 1;
   }
-  if (murmur_session_send_datagram(qs, b, n) != 0) {
-    return 1;
-  }
-  return 0;
+  int rc = murmur_session_send_datagram(qs, b, n);
+  murmur_session_release(qs);
+  return rc != 0;
 }
 
 static int sess_close(void *ctx) {
@@ -862,6 +905,23 @@ static int spawn_detached(murmur_driver_t *d, void *(*fn)(void *),
 static void *stream_pump(void *v);
 static void *dgram_pump(void *v);
 
+static int sync_dbg_on(void) {
+  static int v = -1;
+  if (v < 0) {
+    v = getenv("MURMUR_DEBUG_SYNC") != NULL;
+  }
+  return v;
+}
+
+#define SYNC_DBG(...)                                    \
+  do {                                                   \
+    if (sync_dbg_on()) {                                 \
+      fprintf(stderr, "murmur-sync: ");                  \
+      fprintf(stderr, __VA_ARGS__);                      \
+      fprintf(stderr, "\n");                             \
+    }                                                    \
+  } while (0)
+
 /* Registers a handshaked session and spawns its pumps. */
 static void register_and_serve(murmur_driver_t *d, murmur_session_t *qs,
                                const murmur_node_t *peer) {
@@ -895,13 +955,16 @@ static void *stream_pump(void *v) {
   for (;;) {
     pthread_mutex_lock(&d->mu);
     int dead = s->dead || !d->running;
-    murmur_session_t *qs = s->qs;
+    murmur_session_t *qs =
+        !dead ? murmur_session_acquire(s->qs) : NULL;
     pthread_mutex_unlock(&d->mu);
     if (dead || !qs) {
+      murmur_session_release(qs);
       return NULL;
     }
     murmur_stream_t *st = NULL;
     int rc = murmur_session_accept_stream(qs, &st, DRIVER_POLL_MS);
+    murmur_session_release(qs);
     if (rc == -MURMUR_QUIC_TIMEOUT) {
       continue;
     }
@@ -924,7 +987,10 @@ static void *stream_pump(void *v) {
     io.close = stream_close;
     io.error_text = stream_error;
     io.ctx = c;
-    murmur_serve_stream(d->eng, &s->peer, &io, NULL, NULL);
+    SYNC_DBG("serve begin");
+    murmur_sync_status_t sst =
+        murmur_serve_stream(d->eng, &s->peer, &io, NULL, NULL);
+    SYNC_DBG("serve end st=%d", (int)sst);
     io_close(&io);
   }
 }
@@ -936,15 +1002,18 @@ static void *dgram_pump(void *v) {
   for (;;) {
     pthread_mutex_lock(&d->mu);
     int dead = s->dead || !d->running;
-    murmur_session_t *qs = s->qs;
+    murmur_session_t *qs =
+        !dead ? murmur_session_acquire(s->qs) : NULL;
     pthread_mutex_unlock(&d->mu);
     if (dead || !qs) {
+      murmur_session_release(qs);
       return NULL;
     }
     size_t len = 0;
     int rc =
         murmur_session_recv_datagram(qs, buf, sizeof(buf), &len,
                                      DRIVER_POLL_MS);
+    murmur_session_release(qs);
     if (rc == -MURMUR_QUIC_TIMEOUT) {
       continue;
     }
@@ -1222,6 +1291,45 @@ static int is_schema_mismatch(murmur_sync_status_t st, const char *detail) {
          strstr(detail, "schema mismatch") != NULL;
 }
 
+/* isCursorPruned: Protocol + "cursor pruned" in the message: our pull
+ * cursor is below the donor's GC watermark, so per-tx catch-up can
+ * never succeed and a snapshot is required. */
+static int is_cursor_pruned(murmur_sync_status_t st, const char *detail) {
+  return st == MURMUR_SYNC_PROTOCOL && detail &&
+         strstr(detail, "cursor pruned") != NULL;
+}
+
+/* Reference parity (engine_sync.go missingHistory): a pruned pull
+ * cursor triggers a trust-gated snapshot request. The in-flight
+ * refusal inside request_snapshot plus the 5s sweep cadence pace
+ * retries; failures surface via snapshot_status and the next sweep
+ * retries. Untrusted donors stay on per-tx pull (which keeps
+ * failing closed until an operator provisions trust). */
+static void maybe_request_snapshot(murmur_driver_t *d,
+                                   const murmur_node_t *peer) {
+  pthread_mutex_lock(&d->eng->mu);
+  sqlite3 *db = d->eng->db;
+  pthread_mutex_unlock(&d->eng->mu);
+  murmur_snap_params_t sp;
+  memset(&sp, 0, sizeof(sp));
+  if (murmur_snap_params_from(db, &sp, NULL) != MURMUR_SYNC_OK) {
+    return;
+  }
+  int trusted = 0;
+  for (size_t i = 0; i < sp.n_trusted; i++) {
+    if (murmur_node_eq(&sp.trusted[i], peer)) {
+      trusted = 1;
+      break;
+    }
+  }
+  murmur_snap_params_free(&sp);
+  if (!trusted) {
+    return;
+  }
+  int sqlrc = 0;
+  murmur_serve_request_snapshot(d->eng, peer, &sqlrc);
+}
+
 typedef struct {
   murmur_driver_t *d;
   murmur_node_t peer;
@@ -1252,42 +1360,72 @@ static int sync_alive(murmur_driver_t *d, sync_arg_t *a,
 static void *sync_thread(void *v) {
   sync_arg_t *a = (sync_arg_t *)v;
   murmur_driver_t *d = a->d;
+  char peer8[9];
+  static const char *hexd = "0123456789abcdef";
+  for (int i = 0; i < 4; i++) {
+    peer8[2 * i] = hexd[a->peer.b[i] >> 4];
+    peer8[2 * i + 1] = hexd[a->peer.b[i] & 15];
+  }
+  peer8[8] = '\0';
+  SYNC_DBG("peer=%s gen=%llu thread start", peer8,
+           (unsigned long long)a->gen);
   for (;;) {
     murmur_driver_sess_t *s = NULL;
     if (!sync_alive(d, a, &s)) {
+      SYNC_DBG("gen=%llu not alive; thread exit",
+               (unsigned long long)a->gen);
       break;
     }
     murmur_session_if_t sess;
     if (!murmur_engine_get_conn(d->eng, &a->peer, &sess)) {
-      break;
-    }
-    murmur_stream_io_t io;
-    memset(&io, 0, sizeof(io));
-    if (sess.open_stream(sess.ctx, &io) != 0) {
-      sess_kill(s);
+      SYNC_DBG("gen=%llu no conn; thread exit",
+               (unsigned long long)a->gen);
       break;
     }
     int adopted = 0;
     int accept = accept_remote(d);
     for (;;) {
+      /* One request per stream: the donor serves exactly one pull
+       * request per accepted stream, so each round opens fresh.
+       * Reusing the stream reads EOF ("truncated frame header"). */
+      if (!sync_alive(d, a, &s)) {
+        break;
+      }
+      murmur_stream_io_t io;
+      memset(&io, 0, sizeof(io));
+      if (sess.open_stream(sess.ctx, &io) != 0) {
+        SYNC_DBG("gen=%llu open_stream failed; killing sess",
+                 (unsigned long long)a->gen);
+        sess_kill(s);
+        break;
+      }
       int more = 0;
       char *detail = NULL;
       murmur_sync_status_t st = murmur_serve_pull_once(
           d->eng, &a->peer, &io, &more, &detail, NULL);
+      io_close(&io);
+      SYNC_DBG("peer=%s gen=%llu pull_once st=%d more=%d detail=%s",
+               peer8, (unsigned long long)a->gen, (int)st, more,
+               detail ? detail : "-");
       if (st == MURMUR_SYNC_OK) {
         free(detail);
         if (!more) {
-          break;
-        }
-        if (!sync_alive(d, a, NULL)) {
           break;
         }
         continue;
       }
       int retry = !adopted && accept &&
                   is_schema_mismatch(st, detail);
+      int pruned = is_cursor_pruned(st, detail);
       free(detail);
+      if (pruned) {
+        SYNC_DBG("gen=%llu cursor pruned; requesting snapshot",
+                 (unsigned long long)a->gen);
+        maybe_request_snapshot(d, &a->peer);
+      }
       if (!retry) {
+        SYNC_DBG("gen=%llu pull error st=%d; closing stream",
+                 (unsigned long long)a->gen, (int)st);
         break;
       }
       adopted = 1;
@@ -1296,7 +1434,6 @@ static void *sync_thread(void *v) {
         break;
       }
     }
-    io_close(&io);
     if (!sync_alive(d, a, NULL)) {
       break;
     }

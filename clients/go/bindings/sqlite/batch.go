@@ -172,6 +172,8 @@ func BlobArg(arena []byte, b []byte) (Arg, []byte) {
 func (s *Stmt) StepOnce() error {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	s.pending = false
 	if rc := C.murmur_step_once(s.s); rc != C.SQLITE_DONE {
 		return errOf(s.db, rc)
@@ -185,6 +187,8 @@ func (s *Stmt) StepOnce() error {
 func (s *Stmt) ExecBatch(args []Arg, arena []byte, nparams int) error {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	s.pending = false
 	if nparams <= 0 || len(args)%nparams != 0 || len(args) == 0 {
 		return fmt.Errorf("sqlite.ExecBatch: bad sizes args=%d nparams=%d", len(args), nparams)
@@ -215,6 +219,8 @@ func (s *Stmt) ExecBatch(args []Arg, arena []byte, nparams int) error {
 func (s *Stmt) StepRows(types []ColType, cols []Cell, arena []byte, maxrows int) (int, bool, error) {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	ncol := len(types)
 	if ncol == 0 || maxrows <= 0 || len(cols) < maxrows*ncol {
 		return 0, false, fmt.Errorf("sqlite.StepRows: bad sizes types=%d cols=%d maxrows=%d", ncol, len(cols), maxrows)
@@ -247,6 +253,8 @@ func (s *Stmt) StepRows(types []ColType, cols []Cell, arena []byte, maxrows int)
 func (s *Stmt) FetchInt64(key int64, types []ColType, cells []Cell, arena []byte) (bool, error) {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	s.pending = false
 	if len(types) != len(cells) || len(types) == 0 {
 		return false, fmt.Errorf("sqlite.FetchInt64: length mismatch %d != %d", len(types), len(cells))
@@ -277,6 +285,8 @@ func (s *Stmt) FetchInt64(key int64, types []ColType, cells []Cell, arena []byte
 func (s *Stmt) FetchManyInt64(keys []int64, types []ColType, cells []Cell, arena []byte, hits []bool) error {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	s.pending = false
 	if len(keys) == 0 || len(types) == 0 || len(cells) < len(keys)*len(types) || len(hits) < len(keys) {
 		return fmt.Errorf("sqlite.FetchManyInt64: bad sizes keys=%d types=%d cells=%d hits=%d",
@@ -309,6 +319,8 @@ func (s *Stmt) FetchManyInt64(keys []int64, types []ColType, cells []Cell, arena
 func (s *Stmt) FetchText(key string, types []ColType, cells []Cell, arena []byte) (bool, error) {
 	s.lock()
 	defer s.unlock()
+	lockDB()
+	defer unlockDB()
 	s.pending = false
 	if len(types) != len(cells) || len(types) == 0 {
 		return false, fmt.Errorf("sqlite.FetchText: length mismatch %d != %d", len(types), len(cells))

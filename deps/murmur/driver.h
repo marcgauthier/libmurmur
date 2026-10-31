@@ -144,6 +144,13 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
  * engine. Idempotent. */
 murmur_sync_status_t murmur_driver_stop(murmur_driver_t *d, int *sqlrc);
 int murmur_driver_running(murmur_driver_t *d);
+/* Runs one retention collection pass now (reference RETENTION COLLECT
+ * parity); moved/pruned (nullable) receive floor advance and tombstone
+ * deletes. Safe to call while running. */
+murmur_sync_status_t murmur_driver_retention_collect(murmur_driver_t *d,
+                                                     uint64_t *moved,
+                                                     uint64_t *pruned,
+                                                     int *sqlrc);
 
 #ifdef __cplusplus
 }

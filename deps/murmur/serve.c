@@ -667,9 +667,12 @@ murmur_sync_status_t murmur_serve_pull_once(murmur_engine_t *e,
   uint8_t digest[32];
   memcpy(digest, reply.msg.digest, 32);
   murmur_node_t batch_site = reply.msg.site;
-  murmur_serve_msg_free(&reply);
+  /* next.after borrows reply.owned: keep reply alive through apply,
+   * which re-encodes the cursor into progress. Freeing first stores
+   * heap garbage that later fails cursor decode on every sweep. */
   st = murmur_sync_apply(db, peer, &batch_site, &cursor.cursor, &next, bytes,
                          digest, sqlrc);
+  murmur_serve_msg_free(&reply);
   murmur_sync_cursor_free(&cursor);
   if (st != MURMUR_SYNC_OK) {
     gauge_release(e, 0, bytes);
@@ -862,20 +865,50 @@ murmur_sync_status_t murmur_serve_pull(murmur_engine_t *e,
     end.tag = MURMUR_MSG_END;
     st = murmur_serve_write_msg(io, &end, detail_out, sqlrc);
   }
+  /* bh.cursor.after borrows the export arena: encode the sent cursor
+   * before freeing the batch (same use-after-free class as the pull
+   * client's next cursor). */
+  size_t ccap = 256;
+  uint8_t *cbuf = NULL;
+  size_t clen = 0;
+  if (st == MURMUR_SYNC_OK) {
+    for (;;) {
+      cbuf = (uint8_t *)realloc(cbuf, ccap);
+      if (!cbuf) {
+        set_sqlrc(sqlrc, SQLITE_OK);
+        st = MURMUR_SYNC_OVERLOADED;
+        break;
+      }
+      clen = murmur_cursor_encode(&bh.cursor, cbuf, ccap);
+      if (clen > 0 || ccap >= (1u << 20)) {
+        break;
+      }
+      ccap *= 2;
+    }
+    if (st == MURMUR_SYNC_OK && clen == 0) {
+      free(cbuf);
+      cbuf = NULL;
+      set_sqlrc(sqlrc, SQLITE_OK);
+      st = MURMUR_SYNC_OVERLOADED;
+    }
+  }
   murmur_sync_export_free(&batch);
   gauge_release(e, 1, (uint64_t)p.max_batch_bytes);
   if (st != MURMUR_SYNC_OK) {
+    free(cbuf);
     goto out;
   }
   murmur_serve_msg_t areply;
   memset(&areply, 0, sizeof(areply));
   st = murmur_serve_read_msg(io, &areply, detail_out, sqlrc);
   if (st != MURMUR_SYNC_OK) {
+    free(cbuf);
     goto out;
   }
   if (areply.msg.tag != MURMUR_MSG_ACK ||
       memcmp(areply.msg.digest, digest, 32) != 0) {
     murmur_serve_msg_free(&areply);
+    free(cbuf);
     set_detail(detail_out, "batch acknowledgement mismatch");
     set_sqlrc(sqlrc, SQLITE_OK);
     st = MURMUR_SYNC_PROTOCOL;
@@ -886,28 +919,6 @@ murmur_sync_status_t murmur_serve_pull(murmur_engine_t *e,
   uint64_t acked = 0;
   if (req->cursor.from > 0) {
     acked = (uint64_t)req->cursor.from;
-  }
-  size_t ccap = 256;
-  uint8_t *cbuf = NULL;
-  size_t clen = 0;
-  for (;;) {
-    cbuf = (uint8_t *)realloc(cbuf, ccap);
-    if (!cbuf) {
-      set_sqlrc(sqlrc, SQLITE_OK);
-      st = MURMUR_SYNC_OVERLOADED;
-      goto out;
-    }
-    clen = murmur_cursor_encode(&bh.cursor, cbuf, ccap);
-    if (clen > 0 || ccap >= (1u << 20)) {
-      break;
-    }
-    ccap *= 2;
-  }
-  if (clen == 0) {
-    free(cbuf);
-    set_sqlrc(sqlrc, SQLITE_OK);
-    st = MURMUR_SYNC_OVERLOADED;
-    goto out;
   }
   sqlite3_stmt *us = NULL;
   int rc = sqlite3_prepare_v3(

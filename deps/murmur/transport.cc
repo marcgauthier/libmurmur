@@ -385,6 +385,19 @@ std::string gate_peer(Endpoint* ep, picoquic_cnx_t* cnx)
     return "";
 }
 
+// picoquic_close_ex stores the reason pointer without copying it, so the
+// phrase must have static lifetime (a gate_peer copy dies at return).
+const char* close_phrase(const std::string& reason)
+{
+    if (reason == "missing peer certificate")
+        return "missing peer certificate";
+    if (reason == "remote network denied")
+        return "remote network denied";
+    if (reason == "remote node denied")
+        return "remote node denied";
+    return "murmur: peer rejected";
+}
+
 // Pump-thread only. Ensure a Session exists for cnx (server side sees
 // verify before any stream callback).
 std::shared_ptr<Session> ensure_session(Endpoint* ep, picoquic_cnx_t* cnx)
@@ -633,7 +646,7 @@ int murmur_quic_cb(picoquic_cnx_t* cnx, uint64_t stream_id, uint8_t* bytes,
             }
         }
         if (!doom_reason.empty())
-            picoquic_close_ex(cnx, 0, doom_reason.c_str());
+            picoquic_close_ex(cnx, 0, close_phrase(doom_reason));
         return 0;
     }
     if (ev == picoquic_callback_stream_data ||
@@ -1136,7 +1149,27 @@ void murmur_quic_free(murmur_quic_t* q)
 
 struct murmur_session {
     std::shared_ptr<Session> ref;
+    /* Handle refs: the owning sess plus transient borrowers (open/
+     * accept/datagram snapshots). Delete at zero so a concurrent
+     * sess_kill cannot free the handle mid-call. */
+    std::atomic<int> refs{1};
 };
+
+murmur_session_t* murmur_session_acquire(murmur_session_t* s)
+{
+    if (s == NULL)
+        return NULL;
+    /* Callers acquire under the registry mutex while an owner ref is
+     * held, so the count cannot be zero here; still CAS-defensive. */
+    int cur = s->refs.load(std::memory_order_relaxed);
+    do {
+        if (cur <= 0)
+            return NULL;
+    } while (!s->refs.compare_exchange_weak(cur, cur + 1,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed));
+    return s;
+}
 
 struct murmur_stream {
     std::shared_ptr<Stream> ref;
@@ -1282,6 +1315,16 @@ int murmur_session_open_stream(murmur_session_t* s, murmur_stream_t** out)
             return;
         }
         uint64_t id = picoquic_get_next_local_stream_id(sess->cnx, 0);
+        // Reserve the peeked id NOW: picoquic only advances its
+        // counter on first write, so two opens before either writes
+        // would mint the same id, overwrite sess->streams[id], and
+        // cross both streams' byte flows (one reader starves). An
+        // empty add creates the stream state and consumes the id
+        // without queueing bytes or waking the pump.
+        if (picoquic_add_to_stream(sess->cnx, id, NULL, 0, 0) != 0) {
+            fut->set(-MURMUR_QUIC_CLOSED, nullptr);
+            return;
+        }
         std::shared_ptr<Stream> t = std::make_shared<Stream>();
         t->session = sess;
         t->id = id;
@@ -1490,7 +1533,10 @@ int murmur_session_wait_closed(murmur_session_t* s, int timeout_ms)
 
 void murmur_session_release(murmur_session_t* s)
 {
-    delete s;
+    if (s == NULL)
+        return;
+    if (s->refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        delete s;
 }
 
 int murmur_stream_write(murmur_stream_t* s, const uint8_t* data, size_t len)
