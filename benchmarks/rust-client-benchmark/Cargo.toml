@@ -1,0 +1,8 @@
+[package]
+name = "murmur-rust-client-benchmark"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+murmur-rust-client = { path = "../../clients/rust" }

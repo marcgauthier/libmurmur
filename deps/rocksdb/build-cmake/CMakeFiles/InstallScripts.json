@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

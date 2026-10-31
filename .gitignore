@@ -1,0 +1,21 @@
+# Binaries and shared libraries
+*.test
+*.so
+*.a
+/bin/
+/build/
+
+# Go build cache and coverage
+coverage.out
+coverage.html
+
+# Editor and OS artifacts
+.DS_Store
+*.swp
+*~
+
+# Local test databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

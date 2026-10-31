@@ -1,0 +1,7 @@
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/rocksdb.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/edit_cache.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/rebuild_cache.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/list_install_components.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/install.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/install/local.dir
+/home/marc/DEV/sqlite-murmur-go/third-party/rocksdb/build-cmake/CMakeFiles/install/strip.dir
