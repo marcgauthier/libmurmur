@@ -4,12 +4,22 @@
   <img src="libmurmur.png" alt="libmurmur" width="600" />
 </p>
 
-A standalone native library: an embedded encrypted SQLite database
-with built-in replication. `libmurmur.a` manages SQLite, the VFS,
-cr-sqlite, zstd, AES/AEGIS encryption, RocksDB storage, and the
-QUIC/TLS transport internally — subsystems talk to each other without
-crossing into client code. C, Rust, and Go are all ordinary clients
-that link the library and use SQL plus a small C API.
+**libmurmur** is an embedded, in-process database library built on SQLite, designed for local-first, peer-to-peer applications requiring high write throughput and masterless replication.
+
+Instead of writing SQLite pages to a standard filesystem file, libmurmur implements a custom SQLite Virtual File System (VFS) that routes storage directly into an embedded **RocksDB** LSM-tree engine. All stored records are transparently compressed with **zstd** and encrypted with **AEGIS-256** (or **AES-256-GCM**) using an **Argon2id**-derived keyring.
+
+### Key Architectural Concepts
+
+- **In-Process SQLite with RocksDB VFS**: Your application speaks standard SQLite SQL, but the underlying byte path never touches a conventional flat database file. RocksDB's LSM-tree architecture absorbs sequential and random mutations with exceptional efficiency.
+- **High Write Throughput & Durability Trade-off**: Writes are buffered and flushed asynchronously (configurable, e.g., 100 ms dirty window). This delivers outstanding write speed (hundreds of thousands of operations per second) with an intentional, accepted trade-off: a bounded window of uncommitted data may be lost in the event of an abrupt process crash or power cut.
+- **Offline-First, Masterless Replication**: Built-in multi-master replication powered by conflict-free replicated data types (CRDTs via `cr-sqlite`) and causal vector clocks. Applications read and write locally without network dependencies. When nodes meet, state reconciles deterministically without central servers, primary leaders, or split-brain locks.
+- **QUIC / TLS Peer-to-Peer Transport**: Inter-node communication runs directly over native QUIC with mutual TLS (picoquic + mbedTLS), ensuring secure, authenticated point-to-point connections with custom URI SAN identities.
+- **SWIM Gossip Failure Detection & Discovery**: Nodes discover peers, track liveliness, and exchange cluster membership updates over UDP datagrams using a bounded SWIM-style gossip protocol.
+- **Rich Native Ecosystem**:
+  - **Vector & Full-Text Search**: In-process embeddings similarity via `vec0` alongside SQLite `FTS5`.
+  - **File Object Storage**: Large binary payloads stored with CRR metadata and stream-replicated over QUIC.
+  - **CLI Tools**: Interactive `sqlite3-murmur` shell for encrypted store inspection and `murmur-admin` for maintenance.
+  - **Language Bindings**: Native C ABI, zero-dependency Rust client, and idiomatic Go package (`murmurdb`).
 
 On-disk format and PRAGMA surface match
 [sqlite-murmur](../sqlite-murmur), proven both directions by the
