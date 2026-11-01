@@ -1,5 +1,9 @@
 # libmurmur
 
+<p align="center">
+  <img src="libmurmur.png" alt="libmurmur" width="600" />
+</p>
+
 A standalone native library: an embedded encrypted SQLite database
 with built-in replication. `libmurmur.a` manages SQLite, the VFS,
 cr-sqlite, zstd, AES/AEGIS encryption, RocksDB storage, and the
