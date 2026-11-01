@@ -8,8 +8,8 @@ package murmur
 import (
 	"sync"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/storage"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/storage"
 )
 
 // VFSName is the registered VFS name.

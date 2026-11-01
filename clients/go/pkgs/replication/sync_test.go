@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 func mustNode(t *testing.T, hex string) NodeID {

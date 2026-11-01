@@ -7,8 +7,8 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/aegis"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/aegis"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // Page-record formats. Layouts mirror the sqlite-murmur wire bytes:

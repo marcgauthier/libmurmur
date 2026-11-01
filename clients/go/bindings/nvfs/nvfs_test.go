@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/storage"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/storage"
 )
 
 func testKey() [32]byte {

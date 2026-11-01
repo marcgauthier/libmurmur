@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 func TestSQLBackupStreamRoundTrip(t *testing.T) {

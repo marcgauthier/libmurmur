@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 const tableDDL = "CREATE TABLE IF NOT EXISTS contention(id TEXT PRIMARY KEY NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '')"

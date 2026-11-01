@@ -1,7 +1,7 @@
 package murmur
 
 import (
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/storage"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/storage"
 )
 
 // Backup checkpoints a live store plus manifest into dest, which must

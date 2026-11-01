@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 // RetentionParams are the floor inputs. No time floor: without

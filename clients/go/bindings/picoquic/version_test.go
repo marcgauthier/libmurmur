@@ -3,7 +3,7 @@ package picoquic_test
 import (
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/picoquic"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/picoquic"
 )
 
 func TestMbedTLSVersion(t *testing.T) {

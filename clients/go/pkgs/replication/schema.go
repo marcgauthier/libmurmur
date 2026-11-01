@@ -1,7 +1,7 @@
 package replication
 
 import (
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // SchemaDDL creates the replication metadata tables. It mirrors the

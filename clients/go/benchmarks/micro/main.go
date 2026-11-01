@@ -5,10 +5,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/murmur"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/replication"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/storage"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/murmur"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/replication"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/storage"
 )
 
 const payload = "sqlite-murmur-benchmark-payload-abcdefghijklmnopqrstuvwxyz-0123456789"

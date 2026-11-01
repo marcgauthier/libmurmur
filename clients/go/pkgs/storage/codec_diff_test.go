@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // Differential proof: the C++ page codec must agree with the Go record

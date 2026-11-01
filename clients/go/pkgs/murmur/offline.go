@@ -3,8 +3,8 @@ package murmur
 import (
 	"os"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/storage"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/storage"
 )
 
 // liveEngine opens a shell on a live store, or nil when the store is

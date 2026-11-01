@@ -5,9 +5,9 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // Directory engines are RocksDB databases with the sqlite-murmur

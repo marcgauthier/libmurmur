@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 const docsDDL = "CREATE TABLE docs(id INTEGER PRIMARY KEY, v TEXT)"

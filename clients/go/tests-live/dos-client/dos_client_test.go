@@ -23,8 +23,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/replication"
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/replication"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 // seconds is a positive-integer seconds env knob with fallback.

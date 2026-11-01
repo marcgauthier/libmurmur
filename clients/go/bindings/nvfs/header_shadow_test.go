@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
 )
 
 // Header-shadow equivalence: every byte in [0,100) served by the

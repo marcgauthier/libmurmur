@@ -3,8 +3,8 @@ package storage
 import (
 	"strings"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 func rocksdbIsIOError(err error) bool {

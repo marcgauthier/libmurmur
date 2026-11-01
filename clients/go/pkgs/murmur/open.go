@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // OpenOptions carries per-open selections. The zero value opens

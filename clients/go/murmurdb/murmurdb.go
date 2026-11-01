@@ -48,8 +48,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	drv "github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/driver"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	drv "github.com/marcgauthier/libmurmur/clients/go/bindings/driver"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // DriverName is the database/sql registration name.

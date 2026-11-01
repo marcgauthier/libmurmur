@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 // Regression: in-process StopNode/StartNode on a node that completed a

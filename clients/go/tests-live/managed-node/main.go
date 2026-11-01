@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/managedharness"
+	"github.com/marcgauthier/libmurmur/clients/go/tests-live/managedharness"
 )
 
 func decode(value string, target []byte) error {

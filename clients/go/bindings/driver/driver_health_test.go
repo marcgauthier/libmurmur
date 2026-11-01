@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	sqlite "github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	sqlite "github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // Regression: health_triple inverted the murmur_cfg_atoi return code, so

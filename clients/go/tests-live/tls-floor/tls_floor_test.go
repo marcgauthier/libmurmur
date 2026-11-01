@@ -26,8 +26,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/replication"
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/replication"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 // credentials bundles the probe-side chain, key, and trust roots.

@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"time"
 
-	drv "github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/driver"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/murmurdb"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/murmur"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/replication"
+	drv "github.com/marcgauthier/libmurmur/clients/go/bindings/driver"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/murmurdb"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/murmur"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/replication"
 )
 
 // runDatabaseSQL runs the single-suite workload through database/sql

@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/files"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/files"
 )
 
 type childReq struct {

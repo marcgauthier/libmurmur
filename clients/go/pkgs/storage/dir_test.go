@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
 )
 
 func dirKey(seed byte) [32]byte {

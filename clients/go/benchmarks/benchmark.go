@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/murmur"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/replication"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/murmur"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/replication"
 )
 
 const seedRows = 50000

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 // Transport moves frames between nodes. Implementations own dialing,

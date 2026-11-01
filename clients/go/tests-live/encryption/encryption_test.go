@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 const secret = "SQL-CONFIDENTIAL-PLAINTEXT-SECRET-246813579"

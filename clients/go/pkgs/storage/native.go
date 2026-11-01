@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvapi"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // Native seam for the C++ VFS hot path (bindings/nvfs).

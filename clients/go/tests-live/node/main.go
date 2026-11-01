@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/driver"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/files"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/driver"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/files"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 type strList []string

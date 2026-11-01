@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/picoquic"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/picoquic"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // PicoquicTransport is the native (picoquic + mbedTLS) QUIC endpoint

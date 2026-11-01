@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 // wait is the final convergence deadline (reference: WAIT = 120 s).

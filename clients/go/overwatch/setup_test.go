@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/murmurdb"
+	"github.com/marcgauthier/libmurmur/clients/go/murmurdb"
 )
 
 // Encrypted open and schema setup behave like OVERWATCH's embedded

@@ -8,7 +8,7 @@ replication drivers over VFS stores, in-process by default.
 ## Harness
 
 ```go
-import goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+import goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 
 goharness.SkipUnlessLive(t) // MURMUR_ENGINE_INTEGRATION=1 gate
 cluster, err := goharness.NewCluster(goharness.ClusterOptions{

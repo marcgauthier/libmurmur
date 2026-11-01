@@ -9,7 +9,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 // vettedKey caches a vet verdict per (peer, claimed digest).

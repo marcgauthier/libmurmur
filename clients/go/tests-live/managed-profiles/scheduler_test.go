@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	mh "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/managedharness"
+	mh "github.com/marcgauthier/libmurmur/clients/go/tests-live/managedharness"
 )
 
 func TestManagedWriterServiceUnderRealRemoteApply(t *testing.T) {

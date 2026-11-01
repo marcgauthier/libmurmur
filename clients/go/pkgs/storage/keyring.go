@@ -14,7 +14,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvapi"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
 	"golang.org/x/crypto/argon2"
 )
 

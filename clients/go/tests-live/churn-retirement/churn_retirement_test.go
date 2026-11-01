@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 // excluded is the excluded node.

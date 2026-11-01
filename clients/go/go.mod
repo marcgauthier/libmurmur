@@ -1,4 +1,4 @@
-module github.com/marcgauthier/sqlite-murmur-go/clients/go
+module github.com/marcgauthier/libmurmur/clients/go
 
 go 1.24
 

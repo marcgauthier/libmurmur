@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 func testPage() []byte {

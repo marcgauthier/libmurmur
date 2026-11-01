@@ -16,7 +16,7 @@ package plumtreelive
 import (
 	"testing"
 
-	goharness "github.com/marcgauthier/sqlite-murmur-go/clients/go/tests-live/goharness"
+	goharness "github.com/marcgauthier/libmurmur/clients/go/tests-live/goharness"
 )
 
 func TestPlumtreeMeshConverges(t *testing.T) {

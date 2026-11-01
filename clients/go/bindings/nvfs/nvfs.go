@@ -91,15 +91,15 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvapi"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 
 	// Symbol homes for the C++ codec: the codec calls ZSTD_* and
 	// aegis_* across the final link, and these edges pull those
 	// objects into every binary (including this package's tests)
 	// instead of relying on incidental imports.
-	_ "github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/aegis"
-	_ "github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	_ "github.com/marcgauthier/libmurmur/clients/go/bindings/aegis"
+	_ "github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // Block and MaxRecord mirror the nv_crypto.h buffer contract.

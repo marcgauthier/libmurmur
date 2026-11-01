@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	"unicode/utf8"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 // Wire protocol: postcard-compatible framing mirroring

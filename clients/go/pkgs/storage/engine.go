@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvapi"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/nvfs"
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/zstd"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvfs"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // SQLite result codes mirrored for the engine and PRAGMA table.

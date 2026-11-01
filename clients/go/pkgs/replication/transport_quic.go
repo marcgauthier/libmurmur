@@ -24,7 +24,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/bindings/sqlite"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
 
 // quicALPN is the wire protocol id, shared with the Rust nodes.

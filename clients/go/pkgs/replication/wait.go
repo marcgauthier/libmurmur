@@ -9,7 +9,7 @@ package replication
 import (
 	"time"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/pkgs/tx"
+	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
 )
 
 // PollInterval paces wait polling.

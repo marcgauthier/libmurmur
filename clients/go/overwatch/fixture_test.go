@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/marcgauthier/sqlite-murmur-go/clients/go/murmurdb"
+	"github.com/marcgauthier/libmurmur/clients/go/murmurdb"
 )
 
 // testKey returns a fresh random 32-byte store key.
