@@ -28,6 +28,26 @@ if [[ ! -f "$root/libmurmur.a" ]]; then
   (cd "$root" && make -j"$(nproc 2>/dev/null || echo 4)")
 fi
 
+# Managed profiles use their own child and controlled original-record
+# delivery. They do not depend on the legacy network driver's binary.
+case "$scenario" in
+  managed|managed-profiles|managed-durability)
+    managed_count=${MURMUR_MANAGED_TEST_COUNT:-1}
+    if [[ ! "$managed_count" =~ ^[1-9][0-9]*$ ]]; then
+      echo "MURMUR_MANAGED_TEST_COUNT must be a positive integer" >&2
+      exit 1
+    fi
+    managed_packages=("./tests-live/managed-profiles/" "./tests-live/managed-durability/")
+    if [[ "$scenario" != managed ]]; then
+      managed_packages=("./tests-live/$scenario/")
+    fi
+    (cd "$gomod" && CGO_ENABLED=1 \
+      CGO_CXXFLAGS="${CGO_CXXFLAGS:-} -DMURMUR_TEST_LIBRARY_REV=$(stat -c %Y "$root/libmurmur.a")" \
+      go test -race -count="$managed_count" -timeout 20m "${managed_packages[@]}")
+    exit 0
+    ;;
+esac
+
 # Reap node processes rooted at OUR runtime dir on the way out (Ctrl-C,
 # inter-scenario kills, CI cancel). Scoped by the --root path so parallel
 # runs with their own MURMUR_LIVE_RUNTIME roots are never touched. No-op on
@@ -138,7 +158,7 @@ case "$scenario" in
       run_scenario "$scenario"
     else
       echo "Unknown scenario: $scenario" >&2
-      echo "Available scenarios: $ALL_SCENARIOS all gate soak stress" >&2
+      echo "Available scenarios: $ALL_SCENARIOS all gate soak stress managed managed-profiles managed-durability" >&2
       exit 1
     fi
     ;;

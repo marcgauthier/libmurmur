@@ -1372,16 +1372,11 @@ murmur_sync_status_t murmur_schema_diff(const uint8_t *local, size_t local_len,
         }
       }
       if (!match) {
-        out->incompatible = incompat_msg(
-            "column dropped: ", rv[i].table, rv[i].table_len, ".",
-            (const uint8_t *)before.cols[k].name, strlen(before.cols[k].name));
-        if (!out->incompatible) {
-          st = MURMUR_SYNC_SQLITE;
-          set_sqlrc(sqlrc, SQLITE_NOMEM);
-        } else {
-          done = 1;
-        }
-        break;
+        /* Local-extra columns are kept, not conflicts (Go
+         * SchemaDiff): the peer adopts them when it sees our
+         * manifest, so divergent additive branches merge through
+         * mutual adoption. Only shared columns must agree. */
+        continue;
       }
       if (strcmp(before.cols[k].def, match->def) != 0) {
         out->incompatible = incompat_msg(
@@ -1420,19 +1415,9 @@ murmur_sync_status_t murmur_schema_diff(const uint8_t *local, size_t local_len,
     ddl_shape_free(&before);
     ddl_shape_free(&after);
   }
-  /* retired local tables in local order (Go ranges local.Pairs) */
-  for (size_t i = 0; i < ln && st == MURMUR_SYNC_OK && !done; i++) {
-    if (!wire_lookup(rv, rn, lv[i].table, lv[i].table_len)) {
-      out->incompatible = incompat_msg("table retired: ", lv[i].table,
-                                       lv[i].table_len, NULL, NULL, 0);
-      if (!out->incompatible) {
-        st = MURMUR_SYNC_SQLITE;
-        set_sqlrc(sqlrc, SQLITE_NOMEM);
-      } else {
-        done = 1;
-      }
-    }
-  }
+  /* Local-extra tables are kept, not conflicts (Go SchemaDiff;
+   * same merge rule as columns; destructive DDL is guarded at
+   * write time instead). */
   free(lv);
   free(rv);
   if (st != MURMUR_SYNC_OK) {
@@ -1485,14 +1470,74 @@ murmur_sync_status_t murmur_puller_compatible(const uint8_t *local,
     free(pv);
     return invalid_fail(sqlrc);
   }
+  /* The puller may carry local-extra tables and columns; every
+   * donor table must exist on the puller with the same column set
+   * (name and normalized definition) and equal constraints. The
+   * comparison is order-insensitive so merged branches with
+   * different column order stay compatible: cr-sqlite changes
+   * address columns by name, so order never affects data flow.
+   * Unparseable DDL fails closed. */
   int ok = 1;
-  for (size_t i = 0; i < ln; i++) {
+  for (size_t i = 0; i < ln && ok; i++) {
     const murmur_schema_pair_t *pe =
         wire_lookup(pv, pn, lv[i].table, lv[i].table_len);
-    if (!pe || !bytes_eq(pe->ddl, pe->ddl_len, lv[i].ddl, lv[i].ddl_len)) {
+    if (!pe) {
       ok = 0;
       break;
     }
+    if (bytes_eq(pe->ddl, pe->ddl_len, lv[i].ddl, lv[i].ddl_len)) {
+      continue;
+    }
+    static const uint8_t empty_ddl[1] = {0};
+    ddl_shape_t donor, have;
+    int dr = ddl_columns(lv[i].ddl ? lv[i].ddl : empty_ddl, lv[i].ddl_len,
+                         &donor);
+    int hr = ddl_columns(pe->ddl ? pe->ddl : empty_ddl, pe->ddl_len, &have);
+    if (dr < 0 || hr < 0) {
+      if (dr == 1) {
+        ddl_shape_free(&donor);
+      }
+      if (hr == 1) {
+        ddl_shape_free(&have);
+      }
+      free(lv);
+      free(pv);
+      return sqlite_fail(sqlrc, SQLITE_NOMEM);
+    }
+    if (dr == 0 || hr == 0) {
+      if (dr == 1) {
+        ddl_shape_free(&donor);
+      }
+      if (hr == 1) {
+        ddl_shape_free(&have);
+      }
+      ok = 0;
+      break;
+    }
+    if (donor.n_cons != have.n_cons) {
+      ok = 0;
+    } else {
+      for (size_t k = 0; k < donor.n_cons && ok; k++) {
+        if (donor.cons[k].n != have.cons[k].n ||
+            memcmp(donor.cons[k].p, have.cons[k].p, donor.cons[k].n) != 0) {
+          ok = 0;
+        }
+      }
+    }
+    for (size_t k = 0; k < donor.n_cols && ok; k++) {
+      const col_t *match = NULL;
+      for (size_t j = 0; j < have.n_cols; j++) {
+        if (strcmp(donor.cols[k].name, have.cols[j].name) == 0) {
+          match = &have.cols[j];
+          break;
+        }
+      }
+      if (!match || strcmp(donor.cols[k].def, match->def) != 0) {
+        ok = 0;
+      }
+    }
+    ddl_shape_free(&donor);
+    ddl_shape_free(&have);
   }
   free(lv);
   free(pv);

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "rocksdb/rocksdb_namespace.h"
+#include <cstdint>
 
 namespace ROCKSDB_NAMESPACE {
 class SystemClock;

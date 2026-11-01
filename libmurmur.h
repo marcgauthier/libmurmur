@@ -18,6 +18,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Opt-in native foundations; these do not enable a new wire protocol. */
+#include "deps/murmur/scheduler.h"
+#include "deps/murmur/origin.h"
+#include "deps/murmur/managed.h"
+#include "deps/murmur/causal.h"
+#include "deps/murmur/managed_origin.h"
+#include "deps/murmur/managed_schema.h"
+
 #define MURMUR_VERSION_MAJOR 0
 #define MURMUR_VERSION_MINOR 1
 #define MURMUR_VERSION_PATCH 0

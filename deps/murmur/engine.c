@@ -363,12 +363,45 @@ char *murmur_engine_status(murmur_engine_t *e) {
   uint64_t adoptions = e->schema_adoptions;
   uint64_t vok = e->vet_ok, vno = e->vet_no, vfail = e->vet_fail;
   uint64_t sok = e->serve_ok, srej = e->serve_reject, serr = e->serve_error;
+  uint64_t m_recv = e->recv_batches, m_snap = e->snapshots;
+  uint64_t m_gossip = e->gossip_rounds;
+  uint64_t m_psent = e->probes_sent, m_pfail = e->probes_failed;
+  uint64_t m_ae = e->anti_entropy, m_push = e->schema_pushes;
+  uint64_t m_runs = e->retention_runs;
+  uint64_t m_abytes = e->apply_bytes, m_anos = e->apply_nanos;
+  uint64_t serving_use = e->serving_in_use;
+  uint64_t receiving_max = e->receiving_max, receiving_use = e->receiving_in_use;
+  sqlite3 *db = e->db;
   char *le = e->last_error_text ? strdup(e->last_error_text) : NULL;
   int has_err = e->has_last_err;
   int32_t code = e->last_err_code;
   char *kind = e->last_err_kind ? strdup(e->last_err_kind) : NULL;
   char *msg = e->last_err_msg ? strdup(e->last_err_msg) : NULL;
   pthread_mutex_unlock(&e->mu);
+  size_t members = 0;
+  pthread_mutex_lock(&e->mship_mu);
+  if (e->mship && murmur_mship_view(e->mship)) {
+    members = murmur_view_size(murmur_mship_view(e->mship));
+  }
+  pthread_mutex_unlock(&e->mship_mu);
+  /* staged gauge + durable collected counter (db reads need no lock). */
+  uint64_t staged = 0, rcollected = 0;
+  if (running && db) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM murmur_stage", -1, &st,
+                           NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+      staged = (uint64_t)sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    int sqlrc = 0;
+    murmur_tx_retention_status_t rst;
+    memset(&rst, 0, sizeof(rst));
+    if (murmur_tx_status(db, &rst, &sqlrc) == MURMUR_SYNC_OK) {
+      rcollected = rst.collected_transactions;
+    }
+    murmur_tx_retention_status_free(&rst);
+  }
   jbuf_t b;
   jinit(&b);
   int first = 1;
@@ -399,8 +432,57 @@ char *murmur_engine_status(murmur_engine_t *e) {
       jkey(&b, &first, "last_error_message");
       jstr(&b, msg ? msg : "");
     }
+    jkey(&b, &first, "members");
+    ju64(&b, (uint64_t)members);
+    /* OVERWATCH ReplicationMetrics with reference names. Units are
+     * batches (pushed/received/applied), bytes, and nanos; the pull
+     * model has no need phase, so no chunk_need_* counters exist. */
+    jkey(&b, &first, "metrics");
+    {
+      int f2 = 1;
+      jkey(&b, &f2, "pushed_transactions");
+      ju64(&b, sent);
+      jkey(&b, &f2, "received_transactions");
+      ju64(&b, m_recv);
+      jkey(&b, &f2, "applied_transactions");
+      ju64(&b, applied);
+      jkey(&b, &f2, "staged_transactions");
+      ju64(&b, staged);
+      jkey(&b, &f2, "snapshots_applied");
+      ju64(&b, m_snap);
+      jkey(&b, &f2, "gossip_rounds");
+      ju64(&b, m_gossip);
+      jkey(&b, &f2, "probes_sent");
+      ju64(&b, m_psent);
+      jkey(&b, &f2, "probes_failed");
+      ju64(&b, m_pfail);
+      jkey(&b, &f2, "anti_entropy_runs");
+      ju64(&b, m_ae);
+      jkey(&b, &f2, "schema_pushes");
+      ju64(&b, m_push);
+      jkey(&b, &f2, "schema_adoptions");
+      ju64(&b, adoptions);
+      jkey(&b, &f2, "retention_runs");
+      ju64(&b, m_runs);
+      jkey(&b, &f2, "retention_pruned");
+      ju64(&b, rcollected);
+      jkey(&b, &f2, "queue_available_bytes");
+      ju64(&b, receiving_max > receiving_use ? receiving_max - receiving_use
+                                             : 0);
+      jkey(&b, &f2, "apply_batches");
+      ju64(&b, applied);
+      jkey(&b, &f2, "apply_bytes");
+      ju64(&b, m_abytes);
+      jkey(&b, &f2, "apply_nanos");
+      ju64(&b, m_anos);
+      jraw(&b, "}", 1);
+    }
     jkey(&b, &first, "node_id");
     jstr(&b, node);
+    /* No send backlog exists in the pull model; the instantaneous
+     * serve hold is the closest pending-send figure. */
+    jkey(&b, &first, "pending_bytes");
+    ju64(&b, serving_use);
     jkey(&b, &first, "running");
     jraw(&b, "true", 4);
     jkey(&b, &first, "schema_adoptions");
@@ -713,8 +795,19 @@ static const char *state_str(murmur_state_t s) {
 
 /* Go hand-concatenates Peers() with no JSON escaping; replicate. A
  * zero address renders Go's "invalid AddrPort". */
+/* Per-peer replication diagnostics (OVERWATCH PeerDiagnostics
+ * subset with honest pull-model sources). */
+typedef struct {
+  int has_seen;
+  uint64_t last_seen_ago;
+  uint64_t sent_watermark;
+  uint64_t lag_txns;
+  uint64_t origins_behind;
+  int schema_agreed;
+} peer_diag_t;
+
 static void jem_emit(jbuf_t *b, int *first, const murmur_member_t *m,
-                     int connected) {
+                     int connected, const peer_diag_t *diag) {
   char id[33], addr[64];
   murmur_engine_node_format(&m->node, id);
   static const murmur_addr_t zero;
@@ -732,11 +825,100 @@ static void jem_emit(jbuf_t *b, int *first, const murmur_member_t *m,
   jraw(b, "\",\"state\":\"", 11);
   const char *st = state_str(m->state);
   jraw(b, st, strlen(st));
+  jraw(b, "\",\"member_state\":\"", 18);
+  jraw(b, st, strlen(st));
   jraw(b, "\",\"connected\":", 14);
   jraw(b, connected ? "true" : "false", connected ? 4 : 5);
   jraw(b, ",\"incarnation\":", 15);
   ju64(b, m->incarnation);
+  jraw(b, ",\"schema_agreed\":", 17);
+  jraw(b, diag->schema_agreed ? "true" : "false", diag->schema_agreed ? 4 : 5);
+  /* Pull-only stack: no peer ever enters push mode. */
+  jraw(b, ",\"push_mode\":false", 18);
+  jraw(b, ",\"last_seen_millis_ago\":", 24);
+  if (diag->has_seen) {
+    ju64(b, diag->last_seen_ago);
+  } else {
+    jraw(b, "null", 4);
+  }
+  jraw(b, ",\"sent_watermark\":", 18);
+  ju64(b, diag->sent_watermark);
+  jraw(b, ",\"lag_txns\":", 12);
+  ju64(b, diag->lag_txns);
+  jraw(b, ",\"origins_behind\":", 18);
+  ju64(b, diag->origins_behind);
   jraw(b, "}", 1);
+}
+
+/* Schema agreement for one peer (reference parity: schemaAcked !=
+ * nil). schema_sent[] records peers that acked our manifest push,
+ * so an entry means mutual agreement on the pushed schema. The
+ * vetted cache is the reverse direction (our verdict on their
+ * manifest) and only populates on pull-vet. */
+static int peer_schema_agreed(const murmur_schema_sent_t *sent, size_t n_sent,
+                              const murmur_node_t *peer) {
+  for (size_t i = n_sent; i > 0; i--) {
+    if (murmur_node_eq(&sent[i - 1].peer, peer)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Lag math over our applied heads vs the peer's acked boundary. */
+static void peer_lag(const murmur_tx_progress_t *heads, size_t n_heads,
+                     const murmur_tx_peer_t *record, int have_record,
+                     uint64_t *sent_wm, uint64_t *lag, uint64_t *behind) {
+  uint64_t wm = 0, lg = 0, bh = 0;
+  if (have_record) {
+    for (size_t i = 0; i < record->n_acks; i++) {
+      if (record->acks[i].seq > wm) {
+        wm = record->acks[i].seq;
+      }
+    }
+    for (size_t i = 0; i < n_heads; i++) {
+      uint64_t ack = 0;
+      for (size_t k = 0; k < record->n_acks; k++) {
+        if (murmur_node_eq(&record->acks[k].origin, &heads[i].origin)) {
+          ack = record->acks[k].seq;
+          break;
+        }
+      }
+      if (heads[i].applied > ack) {
+        lg += heads[i].applied - ack;
+        bh++;
+      }
+    }
+  }
+  *sent_wm = wm;
+  *lag = lg;
+  *behind = bh;
+}
+
+/* Fills one row's diagnostics from the schema-ack records, peer
+ * ack records, and our applied heads. */
+static void peer_diag_fill(peer_diag_t *diag, sqlite3 *db,
+                           const murmur_schema_sent_t *sent, size_t n_sent,
+                           const murmur_tx_progress_t *heads, size_t n_heads,
+                           const murmur_node_t *peer, uint64_t now_ms) {
+  memset(diag, 0, sizeof(*diag));
+  diag->schema_agreed = peer_schema_agreed(sent, n_sent, peer);
+  if (!db) {
+    return;
+  }
+  murmur_tx_peer_t record;
+  memset(&record, 0, sizeof(record));
+  int found = 0, sqlrc = 0;
+  if (murmur_tx_peer(db, peer, &record, &found, &sqlrc) == MURMUR_SYNC_OK &&
+      found) {
+    diag->has_seen = 1;
+    diag->last_seen_ago = now_ms > record.last_seen_millis
+                              ? now_ms - record.last_seen_millis
+                              : 0;
+    peer_lag(heads, n_heads, &record, 1, &diag->sent_watermark,
+             &diag->lag_txns, &diag->origins_behind);
+  }
+  murmur_tx_peer_free(&record);
 }
 
 char *murmur_engine_peers(murmur_engine_t *e) {
@@ -769,7 +951,28 @@ char *murmur_engine_peers(murmur_engine_t *e) {
     }
   }
   size_t n_conns = e->n_conns;
+  murmur_schema_sent_t *sent = NULL;
+  size_t n_sent = e->n_schema_sent;
+  if (n_sent > 0) {
+    sent = (murmur_schema_sent_t *)malloc(n_sent * sizeof(*sent));
+    if (sent) {
+      memcpy(sent, e->schema_sent, n_sent * sizeof(*sent));
+    } else {
+      n_sent = 0;
+    }
+  }
+  sqlite3 *db = e->db;
   pthread_mutex_unlock(&e->mu);
+  murmur_tx_progress_t *heads = NULL;
+  size_t n_heads = 0;
+  if (db) {
+    int sqlrc = 0;
+    if (murmur_tx_progress(db, &heads, &n_heads, &sqlrc) != MURMUR_SYNC_OK) {
+      heads = NULL;
+      n_heads = 0;
+    }
+  }
+  uint64_t now_ms = murmur_tx_now_millis();
   jbuf_t b;
   jinit(&b);
   int first = 1;
@@ -782,7 +985,10 @@ char *murmur_engine_peers(murmur_engine_t *e) {
           connected = murmur_node_eq(&conns[k], &m->node);
         }
       }
-      jem_emit(&b, &first, m, connected);
+      peer_diag_t diag;
+      peer_diag_fill(&diag, db, sent, n_sent, heads, n_heads, &m->node,
+                     now_ms);
+      jem_emit(&b, &first, m, connected, &diag);
     }
     /* Union with the transport conn table (reference parity: SHOW
      * PEERS iterates conns, not the gossip view). A freshly dialed
@@ -801,7 +1007,10 @@ char *murmur_engine_peers(murmur_engine_t *e) {
         memset(&synth, 0, sizeof(synth));
         synth.node = conns[k];
         synth.state = (murmur_state_t)99; /* renders "unknown" */
-        jem_emit(&b, &first, &synth, 1);
+        peer_diag_t diag;
+        peer_diag_fill(&diag, db, sent, n_sent, heads, n_heads, &conns[k],
+                       now_ms);
+        jem_emit(&b, &first, &synth, 1, &diag);
       }
     }
   }
@@ -811,6 +1020,10 @@ char *murmur_engine_peers(murmur_engine_t *e) {
   jraw(&b, "]", 1);
   free(members);
   free(conns);
+  free(sent);
+  if (heads) {
+    murmur_tx_progress_free(heads, n_heads);
+  }
   return jfinish(&b, "[]");
 }
 
@@ -1293,6 +1506,26 @@ murmur_sync_status_t murmur_engine_start(murmur_engine_t *e, char **detail_out,
   }
   sqlite3 *db = e->db;
   pthread_mutex_unlock(&e->mu);
+  /* Signed stores must never fall back to this legacy unsigned runtime. */
+  sqlite3_stmt *profile = NULL;
+  int profile_rc = sqlite3_prepare_v2(db,
+      "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='murmur_origin_config'", -1, &profile, NULL);
+  if (profile_rc != SQLITE_OK) return sqlite_fail(sqlrc, profile_rc);
+  profile_rc = sqlite3_step(profile);
+  sqlite3_finalize(profile);
+  if (profile_rc == SQLITE_ROW) {
+    profile = NULL;
+    profile_rc = sqlite3_prepare_v2(db, "SELECT 1 FROM murmur_origin_config LIMIT 1", -1, &profile, NULL);
+    if (profile_rc != SQLITE_OK) return sqlite_fail(sqlrc, profile_rc);
+    profile_rc = sqlite3_step(profile);
+    sqlite3_finalize(profile);
+    if (profile_rc == SQLITE_ROW) {
+      if (detail_out) *detail_out = strdup("signed store requires managed replication runtime");
+      set_sqlrc(sqlrc, SQLITE_AUTH);
+      return MURMUR_SYNC_AUTH;
+    }
+  }
+  if (profile_rc != SQLITE_DONE) return sqlite_fail(sqlrc, profile_rc);
   murmur_sync_status_t s = murmur_sync_ensure_schema(db, sqlrc);
   if (s != MURMUR_SYNC_OK) {
     return s;
@@ -1573,18 +1806,32 @@ int murmur_engine_take_sync(murmur_engine_t *e) {
 
 void murmur_engine_gossip(murmur_engine_t *e) {
   pthread_mutex_lock(&e->mship_mu);
+  int round = e->mship != NULL;
   if (e->mship) {
     murmur_mship_gossip(e->mship, murmur_word_crypto, NULL);
   }
   pthread_mutex_unlock(&e->mship_mu);
+  if (round) {
+    pthread_mutex_lock(&e->mu);
+    e->gossip_rounds++;
+    pthread_mutex_unlock(&e->mu);
+  }
 }
 
 void murmur_engine_probe(murmur_engine_t *e, uint64_t now_ms) {
+  size_t sent = 0, lost = 0;
   pthread_mutex_lock(&e->mship_mu);
   if (e->mship) {
-    murmur_mship_probe(e->mship, now_ms, murmur_word_crypto, NULL);
+    murmur_mship_probe(e->mship, now_ms, murmur_word_crypto, NULL, &sent,
+                       &lost);
   }
   pthread_mutex_unlock(&e->mship_mu);
+  if (sent > 0 || lost > 0) {
+    pthread_mutex_lock(&e->mu);
+    e->probes_sent += (uint64_t)sent;
+    e->probes_failed += (uint64_t)lost;
+    pthread_mutex_unlock(&e->mu);
+  }
 }
 
 static murmur_sync_status_t mship_map(murmur_mship_status_t st, int *sqlrc) {
@@ -1800,6 +2047,7 @@ murmur_sync_status_t murmur_engine_retention_pass(murmur_engine_t *e,
     *pruned = 0;
   }
   pthread_mutex_lock(&e->mu);
+  e->retention_runs++;
   size_t n_online = e->n_conns;
   murmur_node_t *online = NULL;
   if (n_online > 0) {

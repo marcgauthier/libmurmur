@@ -65,7 +65,11 @@ type NodeConfig struct {
 	Trust   [][16]byte
 	Child   bool // run as a child process instead of in-process
 	NoStart bool // boot the store but leave replication stopped
-	Files   *FilesConfig
+	// SchemaMaster makes this node the schema master (it pushes
+	// signed manifests; peers ack, driving schema_pushes and the
+	// per-peer schema_agreed diagnostic).
+	SchemaMaster bool
+	Files        *FilesConfig
 }
 
 // BootNode creates the store, keys it, writes identity/settings, and
@@ -124,6 +128,10 @@ func BootNode(cfg NodeConfig) (*Node, error) {
 		}
 		raw, _ := json.Marshal(hexes)
 		settings["snapshot_trusted_sources"] = string(raw)
+	}
+	if cfg.SchemaMaster {
+		settings["schema_master_enabled"] = "1"
+		settings["schema_master"] = Hex(cfg.ID[:])
 	}
 	for k, v := range settings {
 		if err := driver.SetSetting(db, k, v); err != nil {
@@ -438,10 +446,17 @@ func (n *Node) PeerAdd(addr string) error {
 
 // PeerRow is one decoded SHOW PEERS row.
 type PeerRow struct {
-	NodeID    string `json:"node_id"`
-	Address   string `json:"address"`
-	State     string `json:"state"`
-	Connected bool   `json:"connected"`
+	NodeID            string  `json:"node_id"`
+	Address           string  `json:"address"`
+	State             string  `json:"state"`
+	Connected         bool    `json:"connected"`
+	SchemaAgreed      bool    `json:"schema_agreed"`
+	PushMode          bool    `json:"push_mode"`
+	LastSeenMillisAgo *uint64 `json:"last_seen_millis_ago"`
+	SentWatermark     uint64  `json:"sent_watermark"`
+	LagTxns           uint64  `json:"lag_txns"`
+	OriginsBehind     uint64  `json:"origins_behind"`
+	MemberState       string  `json:"member_state"`
 }
 
 // ShowPeers decodes the membership view (MURMUR SHOW PEERS).

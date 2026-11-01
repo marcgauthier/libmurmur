@@ -81,6 +81,9 @@ func bootChild(cfg NodeConfig) (*Node, error) {
 	if cfg.NoStart {
 		args = append(args, "--no-start")
 	}
+	if cfg.SchemaMaster {
+		args = append(args, "--schema-master")
+	}
 	if cfg.Files != nil {
 		args = append(args, "--files-dir", cfg.Files.Dir,
 			"--files-key", Hex(cfg.Files.Key[:]),

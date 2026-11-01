@@ -82,15 +82,17 @@ void murmur_schema_diff_free(murmur_schema_diff_t *d);
 
 /* Diffs canonical pair bytes. Like Go, incompatibility is data:
  * OK with additive=0 and incompatible set ("unparseable local/remote
- * DDL: T", "table constraint change: T", "column redefined/dropped:
- * T.col", "table retired: T"); only undecodable bytes fail INVALID. */
+ * DDL: T", "table constraint change: T", "column redefined:
+ * T.col"); only undecodable bytes fail INVALID. Local-extra tables
+ * and columns are kept, not conflicts, so divergent additive
+ * branches merge through mutual adoption. */
 murmur_sync_status_t murmur_schema_diff(const uint8_t *local, size_t local_len,
                                         const uint8_t *remote,
                                         size_t remote_len,
                                         murmur_schema_diff_t *out, int *sqlrc);
 
-/* Donor-side check: every local table exists on the puller with
- * byte-identical DDL. */
+/* Donor-side check: every local table exists on the puller with the
+ * same column set (order-insensitive) and equal constraints. */
 murmur_sync_status_t murmur_puller_compatible(const uint8_t *local,
                                               size_t local_len,
                                               const uint8_t *puller,

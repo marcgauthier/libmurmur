@@ -1,11 +1,11 @@
 /* Native search manager: node-local disposable FTS5 and vec0
  * indexes over source tables. Port of search.go/search_types.go.
  *
- * Definitions are explicit (Options.SearchIndexes). Schema-derived
- * definitions (SchemaSearchDefinitions over StoredSchema FTS/vector
- * column flags) have no substrate in this port: StoredSchema/model
- * codec was never ported, so SyncSearchSchema reconciles the explicit
- * set only.
+ * This manager consumes explicit definitions. The managed API adapter in
+ * managed_search.cc derives those definitions from persisted table/column
+ * identities and FTS/vector declarations; driver callers may still supply
+ * node-local definitions directly. SyncSearchSchema reconciles the supplied
+ * set against the connection's live source schema.
  *
  * Change feed: Go decodes SQLite changesets (EnqueueSearch) plus local
  * row states (SearchRows). Native local and replicated writes land on

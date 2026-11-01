@@ -1,5 +1,6 @@
 // Live scenario: version churn under aggressive log retention converges
-// with no loss; the GC balance proof itself is skipped (see below).
+// with no loss, and GC collects at least 90% of what a measurement
+// window produced.
 //
 // Port of MURMUR-SQL gc-balance: three nodes mesh with aggressive log
 // retention (minimum retained 10, maximum offline 20 s) while one node
@@ -7,20 +8,19 @@
 // ranges. The portable legs run in TestGCChurnConvergesLosslessly: seed,
 // paced churn with zero update errors and at least 5 full sweeps per
 // updater, end-to-end churned-value flow, exact row counts, and identical
-// contents on all nodes (no loss).
-//
-// The reference's core proof -- GC collecting at least 90% of the
-// origin-log batches a measurement window produced -- has no native
-// observable and stays in the skipped TestLogGCKeepsUpWithChurn: there
-// is no SHOW RETENTION wire (collected_transactions never advances),
-// no on-demand collect verb, and the native retention tick runs about
-// every 60 s, so a 40 s window cannot observe a pass. Scope (same as
-// the reference): version churn only; deletes are out of scope.
+// contents on all nodes (no loss). TestLogGCKeepsUpWithChurn adds the
+// balance proof: commits produced map to node 0's own-origin applied
+// head, collected maps to the health retention.collected_transactions
+// counter, and the drain drives on-demand Node.RetentionCollect.
+// Scope (same as the reference): version churn only; deletes are out
+// of scope.
 package gcbalance
 
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -383,11 +383,317 @@ func TestGCChurnConvergesLosslessly(t *testing.T) {
 // TestLogGCKeepsUpWithChurn is the reference's balance proof: after a
 // warmup, a measurement window must show GC collecting at least 90% of
 // the origin-log batches the window produced, with zero GC failures.
-// Not wired: the leg needs writing against the health
-// collected_transactions counter plus Node.RetentionCollect.
+// Commits produced map to node 0's own-origin applied head (every
+// update flushes, so every commit appends one origin-log batch);
+// collected maps to the health retention.collected_transactions
+// counter; the drain drives on-demand Node.RetentionCollect.
 func TestLogGCKeepsUpWithChurn(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	t.Skip("harness: gc-balance proof not wired (collected ratio leg)")
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "gc-balance-ratio",
+		NumNodes: 3,
+	})
+	if err != nil {
+		t.Fatalf("cluster setup: %v", err)
+	}
+	setRetention(t, cluster)
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+	if err := runBalanceBody(t, cluster); err != nil {
+		t.Fatalf("scenario failed: %v", err)
+	}
+	failed = false
+}
+
+const (
+	// balanceWarmup steadies the mesh before measurement (20 s).
+	balanceWarmup = 20 * time.Second
+	// balanceWindow is the measurement window (40 s).
+	balanceWindow = 40 * time.Second
+	// balanceStretchStep extends slow windows (5 s).
+	balanceStretchStep = 5 * time.Second
+	// balanceWindowCap caps window stretching (150 s).
+	balanceWindowCap = 150 * time.Second
+	// balanceCommitFloor is the minimum window commits for GC
+	// pressure (2000).
+	balanceCommitFloor uint64 = 2000
+	// balanceDrainStable polls of stable collection end the drain (2).
+	balanceDrainStable = 2
+	// balanceDrainCap bounds the drain (120 s, scaled by slowdown).
+	balanceDrainCap = 120 * time.Second
+)
+
+// gcSnapshot holds commit/GC balance counters sampled from node 0.
+type gcSnapshot struct {
+	// commits are local commits produced (node 0's own-origin
+	// applied head).
+	commits uint64
+	// collected are origin-log transactions collected (durable
+	// health counter).
+	collected uint64
+	// lastError is the latest replication-engine error, if any.
+	lastError *string
+}
+
+// gcCounters samples the balance counters from node 0.
+func gcCounters(cluster *goharness.Cluster) (gcSnapshot, error) {
+	var zero gcSnapshot
+	snap, err := cluster.Node(0).ShowReplication()
+	if err != nil {
+		return zero, fmt.Errorf("node1 SHOW REPLICATION: %w", err)
+	}
+	arr, ok := snap.([]any)
+	if !ok {
+		return zero, fmt.Errorf("node1 SHOW REPLICATION: unexpected shape %T", snap)
+	}
+	own := cluster.NodeID(0)
+	var commits uint64
+	found := false
+	for _, e := range arr {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		origin, _ := m["origin"].(string)
+		if !strings.EqualFold(origin, own) {
+			continue
+		}
+		applied, ok := m["applied"].(float64)
+		if !ok {
+			return zero, fmt.Errorf("node1 SHOW REPLICATION: own origin has no applied head")
+		}
+		commits = uint64(applied)
+		found = true
+		break
+	}
+	if !found {
+		return zero, fmt.Errorf("node1 SHOW REPLICATION: no own-origin head")
+	}
+	h, err := cluster.Node(0).ShowHealth()
+	if err != nil {
+		return zero, fmt.Errorf("node1 health: %w", err)
+	}
+	hm, ok := h.(map[string]any)
+	if !ok {
+		return zero, fmt.Errorf("node1 health is not an object")
+	}
+	ret, ok := hm["retention"].(map[string]any)
+	if !ok {
+		return zero, fmt.Errorf("node1 health has no retention block")
+	}
+	collected, ok := ret["collected_transactions"].(float64)
+	if !ok {
+		return zero, fmt.Errorf("node1 health has no collected counter")
+	}
+	var lastError *string
+	if repl, ok := hm["replication"].(map[string]any); ok {
+		if s, ok := repl["last_error"].(string); ok && s != "" {
+			e := s
+			lastError = &e
+		}
+	}
+	return gcSnapshot{commits: commits, collected: uint64(collected), lastError: lastError}, nil
+}
+
+// isBalanceGCError reports whether an engine error string is
+// GC-shaped (reference matcher).
+func isBalanceGCError(err *string) bool {
+	if err == nil {
+		return false
+	}
+	e := strings.ToLower(*err)
+	return strings.Contains(e, "retention") || strings.Contains(e, "collect") ||
+		strings.Contains(e, "prune") || strings.Contains(e, "gc ") ||
+		strings.Contains(e, "snapshot")
+}
+
+func saturatingSub(a, b uint64) uint64 {
+	if a < b {
+		return 0
+	}
+	return a - b
+}
+
+func runBalanceBody(t *testing.T, cluster *goharness.Cluster) error {
+	t.Helper()
+	for i := 0; i < cluster.Len(); i++ {
+		if _, err := cluster.Node(i).Simple(
+			"CREATE TABLE IF NOT EXISTS contention(id TEXT PRIMARY KEY NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', score INTEGER NOT NULL DEFAULT 0)"); err != nil {
+			return fmt.Errorf("migrate node%d: %w", i+1, err)
+		}
+	}
+	for i := 0; i < cluster.Len(); i++ {
+		if err := cluster.Node(i).SetTableReplicated("contention", true); err != nil {
+			return fmt.Errorf("node%d SET TABLE REPLICATED: %w", i+1, err)
+		}
+		if err := cluster.Node(i).Flush(); err != nil {
+			return fmt.Errorf("node%d flush after SET TABLE: %w", i+1, err)
+		}
+	}
+	if err := cluster.PeerMesh(); err != nil {
+		return fmt.Errorf("mesh peers: %w", err)
+	}
+
+	for i := 0; i < keys; i++ {
+		if err := insertSeed(cluster, keyID(i), "v-0"); err != nil {
+			return err
+		}
+	}
+	if err := waitAllCounts(cluster, keys, countsTimeout); err != nil {
+		return err
+	}
+
+	var stopped atomic.Bool
+	var updateErrs, updates atomic.Uint64
+	var sweeps [updaters]atomic.Uint64
+	var wg sync.WaitGroup
+	for w := 0; w < updaters; w++ {
+		wg.Add(1)
+		go updater(cluster, w, &stopped, &updateErrs, &updates, &sweeps[w], &wg)
+	}
+	// Warm up to steady state, then measure one window: every commit
+	// in the window appends an origin-log batch, so (commits -
+	// collected) is the retained set's growth over the window.
+	time.Sleep(balanceWarmup)
+	before, err := gcCounters(cluster)
+	if err != nil {
+		stopped.Store(true)
+		wg.Wait()
+		return err
+	}
+	time.Sleep(balanceWindow)
+	after, err := gcCounters(cluster)
+	if err != nil {
+		stopped.Store(true)
+		wg.Wait()
+		return err
+	}
+	elapsed := balanceWindow
+	for after.commits-before.commits < balanceCommitFloor && elapsed < balanceWindowCap {
+		time.Sleep(balanceStretchStep)
+		elapsed += balanceStretchStep
+		after, err = gcCounters(cluster)
+		if err != nil {
+			stopped.Store(true)
+			wg.Wait()
+			return err
+		}
+	}
+	fmt.Fprintf(os.Stderr, "window commits=%d over the measurement period\n", after.commits-before.commits)
+	stopped.Store(true)
+	wg.Wait()
+
+	// Drain: the window's tail stays uncollected until a GC pass runs
+	// after the updaters stop. First flush everywhere so node 0's
+	// retention floor advances past the final acks.
+	for i := 0; i < cluster.Len(); i++ {
+		if err := cluster.Node(i).Flush(); err != nil {
+			return fmt.Errorf("node%d drain flush: %w", i+1, err)
+		}
+	}
+	if err := waitDigestsAgreed(cluster, digestTimeout); err != nil {
+		return err
+	}
+	slowdown := elapsed.Seconds() / balanceWindow.Seconds()
+	if slowdown < 1.0 {
+		slowdown = 1.0
+	}
+	drainDeadline := time.Now().Add(time.Duration(float64(balanceDrainCap) * slowdown))
+	stable := 0
+	for time.Now().Before(drainDeadline) {
+		if _, _, err := cluster.Node(0).RetentionCollect(); err != nil {
+			return fmt.Errorf("node1 drain collect: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		next, err := gcCounters(cluster)
+		if err != nil {
+			return err
+		}
+		commits := next.commits - before.commits
+		collected := next.collected - before.collected
+		if next.collected == after.collected {
+			stable++
+		} else {
+			stable = 0
+		}
+		after = next
+		if saturatingSub(commits, collected) <= commits/10 && stable >= balanceDrainStable {
+			break
+		}
+		if stable >= 60 {
+			return fmt.Errorf("collection stalled: %d/%d collected with no progress for 30s", collected, commits)
+		}
+	}
+
+	if updateErrs.Load() != 0 {
+		return fmt.Errorf("%d update errors during churn", updateErrs.Load())
+	}
+	var totalSweeps uint64
+	for w := 0; w < updaters; w++ {
+		got := sweeps[w].Load()
+		totalSweeps += got
+		if got < minSweeps {
+			return fmt.Errorf("updater %d completed only %d sweeps, want >= %d for GC pressure", w, got, minSweeps)
+		}
+	}
+	commits := after.commits - before.commits
+	collected := after.collected - before.collected
+	fmt.Fprintf(os.Stderr, "churn: %d updater sweeps (%d test-counted updates), %d commits produced, %d log batches collected\n",
+		totalSweeps, updates.Load(), commits, collected)
+
+	if commits < balanceCommitFloor {
+		return fmt.Errorf("only %d commits in the window, want >= %d for GC pressure", commits, balanceCommitFloor)
+	}
+	if collected == 0 {
+		return fmt.Errorf("no GC collection during the window; test cannot observe GC")
+	}
+	if !equalOptString(after.lastError, before.lastError) &&
+		(isBalanceGCError(before.lastError) || isBalanceGCError(after.lastError)) {
+		return fmt.Errorf("replication engine GC error during the window: before=%s after=%s",
+			optString(before.lastError), optString(after.lastError))
+	}
+	if saturatingSub(commits, collected) > commits/10 {
+		return fmt.Errorf("GC fell behind: produced %d commits but collected %d (retained grew by %d, want <= %d)",
+			commits, collected, saturatingSub(commits, collected), commits/10)
+	}
+
+	if err := waitValueChanged(cluster, keyID(0), "v-0", valueTimeout); err != nil {
+		return err
+	}
+	if err := waitAllCounts(cluster, keys, countsTimeout); err != nil {
+		return err
+	}
+	if err := waitDigestsAgreed(cluster, digestTimeout); err != nil {
+		return err
+	}
+	want, err := allRows(cluster, 0)
+	if err != nil {
+		return err
+	}
+	for i := 1; i < cluster.Len(); i++ {
+		digest, err := allRows(cluster, i)
+		if err != nil {
+			return err
+		}
+		if !equalRows(digest, want) {
+			return fmt.Errorf("node%d contents differ after GC churn", i+1)
+		}
+	}
+	return nil
+}
+
+func equalOptString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func optString(s *string) string {
+	if s == nil {
+		return "None"
+	}
+	return strconv.Quote(*s)
 }
 
 func equalRows(a, b []contentionRow) bool {

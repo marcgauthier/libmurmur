@@ -171,10 +171,12 @@ void murmur_mship_set_fanout(murmur_mship_t *m, int fanout);
 int murmur_mship_add_conn(murmur_mship_t *m, const murmur_node_t *peer);
 int murmur_mship_has_conn(const murmur_mship_t *m, const murmur_node_t *peer);
 
-/* gossip / probe ticks. now_ms is injected; wf supplies nonces. */
+/* gossip / probe ticks. now_ms is injected; wf supplies nonces.
+ * Probe reports pings emitted and unacked expirations through
+ * nullable out-params (replication probes_sent/probes_failed). */
 void murmur_mship_gossip(murmur_mship_t *m, murmur_word_fn wf, void *wctx);
 void murmur_mship_probe(murmur_mship_t *m, uint64_t now_ms, murmur_word_fn wf,
-                        void *wctx);
+                        void *wctx, size_t *sent_out, size_t *lost_out);
 /* One datagram from the session peer (already decoded). */
 murmur_mship_status_t murmur_mship_on_packet(murmur_mship_t *m,
                                              const murmur_node_t *peer,

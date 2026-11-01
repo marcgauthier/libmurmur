@@ -95,7 +95,12 @@ struct NvDb {
 void wipe(uint8_t *p, size_t n) {
   // explicit_bzero: vectorized like memset but never elided (see
   // cache.cc: volatile wipes were 7% of benchmark CPU).
+#ifdef _WIN32
+  volatile uint8_t *v = (volatile uint8_t *)p;
+  while (n--) *v++ = 0;
+#else
   explicit_bzero(p, n);
+#endif
 }
 
 const size_t kFlushChunk = 512;

@@ -116,6 +116,19 @@ typedef struct murmur_engine {
   murmur_vetted_ent_t *vetted;
   size_t n_vetted, cap_vetted;
   uint64_t vet_ok, vet_no, vet_fail, schema_adoptions;
+  /* OVERWATCH-aligned replication metrics, emitted under status
+   * "metrics" with reference names. Batch/byte/nanos units follow
+   * the pull model; there is no need phase (no chunk_need_*). */
+  uint64_t recv_batches;   /* received_transactions */
+  uint64_t snapshots;      /* snapshots_applied */
+  uint64_t gossip_rounds;  /* gossip_rounds */
+  uint64_t probes_sent;    /* probes_sent */
+  uint64_t probes_failed;  /* probes_failed (unacked expirations) */
+  uint64_t anti_entropy;   /* anti_entropy_runs (pull rounds) */
+  uint64_t schema_pushes;  /* schema_pushes (acked manifests) */
+  uint64_t retention_runs; /* retention_runs */
+  uint64_t apply_bytes;    /* apply_bytes */
+  uint64_t apply_nanos;    /* apply_nanos */
   murmur_schema_sent_t *schema_sent;
   size_t n_schema_sent, cap_schema_sent;
   murmur_engine_conn_t *conns;

@@ -61,3 +61,27 @@ Without `MURMUR_ENGINE_INTEGRATION=1` every suite skips with
 - `<scenario>/` — one package per live scenario (ported from reference).
 - `PORTING.md` — full porting contract and remap tables.
 - `run.sh` — CI/operator runner (this file's sibling).
+
+## Managed signed profiles
+
+The separate `managedharness/` and `managed-node/` exercise the managed C API
+in real child processes. `managed-profiles/` covers all merge policies,
+hostile relays, origin receipts, writer contention, search metadata, migration
+crashes and resource bounds. `managed-durability/` audits exact acknowledged
+payloads after immediate SIGKILL and rolls back a transaction killed before
+COMMIT. These new suites use controlled signed-record delivery over stdio;
+native signed QUIC integration remains pending.
+
+From the repository root:
+
+```sh
+make test-live-managed
+# Equivalent opt-in runner, using the Go race detector in the controller:
+MURMUR_ENGINE_INTEGRATION=1 bash clients/go/tests-live/run.sh managed
+```
+
+The managed runner builds its own child with test-only migration crash
+hooks. Once enabled, missing capabilities fail the test. It needs no legacy
+node binary. Failure artifacts retain stores, identities, signed record/RPC
+traces, progress and acknowledgment audits. See
+[test coverage and stress commands](../../../docs/native/test_expansion.md).

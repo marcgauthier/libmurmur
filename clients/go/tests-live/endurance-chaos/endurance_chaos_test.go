@@ -12,9 +12,10 @@
 // Goroutines share the cluster through one mutex; every cluster touch
 // locks, so lifecycle (stop/start) and reads never race.
 //
-// Degraded legs (no native observable or verb; each has a skipped
-// companion test naming the gap): online key rotation, snapshot
-// offline windows with resync proof, and counter-proven GC progress.
+// Degraded legs: online key rotation has no native verb and stays
+// skipped. Snapshot offline windows with resync proof and
+// counter-proven GC progress run as companion tests against the
+// health collected/applied counters plus Node.RetentionCollect.
 // retention_min_kept is raised to 1000000 so restart outages and
 // stall-breaker cursor resets rejoin over the log path instead of
 // the unsupported snapshot path.
@@ -1584,20 +1585,352 @@ func TestEnduranceKeyRotationLeg(t *testing.T) {
 }
 
 // TestEnduranceSnapshotResyncLeg is the reference's snapshot leg:
-// offline windows past retention force rejoins over the snapshot path,
-// proven via the log-path applied counter. Not wired: the leg needs
-// the long offline-window choreography (the snapshot-resync suite
-// itself converges).
+// an offline window past retention forces the rejoin over the
+// snapshot path. The victim stops while survivors ack 120+ batches
+// and collect past its cursor; after rejoin, the bulk must arrive
+// off the log path (row drift below the outage's acked count while
+// the victim's post-rejoin applied delta stays below it too), and
+// the victim must report a completed snapshot. (A snapshot
+// completion counts as one applied batch on this stack, so the
+// delta proof uses the reference's inequalities rather than zero.)
 func TestEnduranceSnapshotResyncLeg(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	t.Skip("harness: endurance snapshot leg not wired (offline windows past retention + applied proof)")
+	const victim = 2
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "endurance-snapshot",
+		NumNodes: 3,
+	})
+	if err != nil {
+		t.Fatalf("cluster setup: %v", err)
+	}
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+
+	for i := 0; i < 3; i++ {
+		if _, err := cluster.Node(i).Simple(
+			"CREATE TABLE IF NOT EXISTS contention(id TEXT PRIMARY KEY NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '')"); err != nil {
+			t.Fatalf("node %d create contention: %v", i, err)
+		}
+		if err := cluster.Node(i).SetTableReplicated("contention", true); err != nil {
+			t.Fatalf("node %d replicate contention: %v", i, err)
+		}
+		if _, err := cluster.Node(i).Simple(
+			"INSERT INTO murmur_config(name,value) VALUES('retention_min_kept','10') ON CONFLICT(name) DO UPDATE SET value=excluded.value"); err != nil {
+			t.Fatalf("node %d retention floor: %v", i, err)
+		}
+	}
+	// Seed and converge.
+	for n := 0; n < 20; n++ {
+		id := fmt.Sprintf("seed-%04d", n)
+		if _, err := cluster.Node(0).Execute(
+			"INSERT INTO contention(id,name) VALUES($1,'seed')", id); err != nil {
+			t.Fatalf("seed insert %s: %v", id, err)
+		}
+	}
+	if err := cluster.Node(0).Flush(); err != nil {
+		t.Fatalf("flush seed: %v", err)
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1, 2},
+		"SELECT COUNT(*) FROM contention", [][]string{{"20"}}); err != nil {
+		t.Fatalf("converge seed: %v", err)
+	}
+	if err := cluster.Node(victim).Flush(); err != nil {
+		t.Fatalf("victim pre-stop flush: %v", err)
+	}
+	if err := cluster.StopNode(victim); err != nil {
+		t.Fatalf("stop victim: %v", err)
+	}
+	// Outage: survivors ack batches while the victim is down, then
+	// collect past its cursor.
+	var outageAcked uint64
+	for n := 0; n < 130; n++ {
+		node := n % 2
+		id := fmt.Sprintf("outage-%04d", n)
+		if _, err := cluster.Node(node).Execute(
+			"INSERT INTO contention(id,name) VALUES($1,'outage')", id); err != nil {
+			t.Fatalf("outage insert %s: %v", id, err)
+		}
+		if err := cluster.Node(node).Flush(); err != nil {
+			t.Fatalf("outage flush %s: %v", id, err)
+		}
+		outageAcked++
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1},
+		"SELECT COUNT(*) FROM contention", [][]string{{"150"}}); err != nil {
+		t.Fatalf("survivors converge outage rows: %v", err)
+	}
+	for _, i := range []int{0, 1} {
+		moved, _, err := cluster.Node(i).RetentionCollect()
+		if err != nil {
+			t.Fatalf("survivor %d collect: %v", i, err)
+		}
+		if moved == 0 {
+			t.Fatalf("survivor %d collect moved no floors", i)
+		}
+	}
+	// Rejoin and prove the snapshot path.
+	if err := cluster.StartNode(victim); err != nil {
+		t.Fatalf("restart victim: %v", err)
+	}
+	if err := cluster.PeerMesh(); err != nil {
+		t.Fatalf("remesh: %v", err)
+	}
+	appliedAtRejoin, err := snapApplied(cluster, victim)
+	if err != nil {
+		t.Fatalf("victim applied at rejoin: %v", err)
+	}
+	deadline := time.Now().Add(240 * time.Second)
+	var diffRows int
+	var appliedDelta uint64
+	var rows int
+	proven := false
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		appliedNow, err := snapApplied(cluster, victim)
+		if err != nil {
+			t.Fatalf("victim applied sample: %v", err)
+		}
+		victimRows, err := snapRows(cluster, victim)
+		if err != nil {
+			t.Fatalf("victim rows sample: %v", err)
+		}
+		survivorRows, err := snapRows(cluster, 0)
+		if err != nil {
+			t.Fatalf("survivor rows sample: %v", err)
+		}
+		diffRows = snapRowDiff(victimRows, survivorRows)
+		rows = len(survivorRows)
+		appliedDelta = 0
+		if appliedNow > appliedAtRejoin {
+			appliedDelta = appliedNow - appliedAtRejoin
+		}
+		if outageAcked > 100 && uint64(diffRows) < outageAcked && appliedDelta < outageAcked {
+			proven = true
+			break
+		}
+	}
+	t.Logf("snapshot: victim proof outageAcked=%d appliedDelta=%d diffRows=%d/%d proven=%t",
+		outageAcked, appliedDelta, diffRows, rows, proven)
+	if !proven {
+		t.Fatalf("snapshot not proven: outageAcked=%d appliedDelta=%d diffRows=%d/%d",
+			outageAcked, appliedDelta, diffRows, rows)
+	}
+	// Direct proof: the victim completed a snapshot.
+	snap, err := snapStatus(cluster, victim)
+	if err != nil {
+		t.Fatalf("victim snapshot status: %v", err)
+	}
+	if len(snap) < 3 || snap[:3] != "ok " {
+		t.Fatalf("victim completed no snapshot (status %q)", snap)
+	}
+	// Full convergence afterward.
+	if err := goharness.AssertRows(cluster, []int{0, 1, 2},
+		"SELECT COUNT(*) FROM contention", [][]string{{"150"}}); err != nil {
+		t.Fatalf("converge after snapshot: %v", err)
+	}
+	failed = false
+}
+
+// snapApplied returns the applied_batches counter for one node.
+func snapApplied(cluster *goharness.Cluster, idx int) (uint64, error) {
+	st, err := cluster.Node(idx).ShowStatus()
+	if err != nil {
+		return 0, err
+	}
+	m, ok := st.(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("node%d status is not an object", idx+1)
+	}
+	v, ok := m["applied_batches"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("node%d status has no applied_batches", idx+1)
+	}
+	return uint64(v), nil
+}
+
+// snapRows returns canonical PK-ordered encoded rows on one node.
+func snapRows(cluster *goharness.Cluster, idx int) ([]string, error) {
+	rows, err := cluster.Node(idx).Simple("SELECT id, name FROM contention ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if len(row) != 2 {
+			return nil, fmt.Errorf("node%d short row", idx+1)
+		}
+		out = append(out, row[0]+":"+row[1])
+	}
+	return out, nil
+}
+
+// snapRowDiff returns the size of the symmetric difference between
+// two canonical row sets.
+func snapRowDiff(a, b []string) int {
+	counts := make(map[string]int, len(a))
+	for _, s := range a {
+		counts[s]++
+	}
+	diff := 0
+	for _, s := range b {
+		if counts[s] > 0 {
+			counts[s]--
+		} else {
+			diff++
+		}
+	}
+	for _, n := range counts {
+		diff += n
+	}
+	return diff
+}
+
+// snapStatus returns the snapshot status string for one node.
+func snapStatus(cluster *goharness.Cluster, idx int) (string, error) {
+	st, err := cluster.Node(idx).ShowStatus()
+	if err != nil {
+		return "", err
+	}
+	m, ok := st.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("node%d status is not an object", idx+1)
+	}
+	v, ok := m["snapshot"].(string)
+	if !ok {
+		return "", fmt.Errorf("node%d status has no snapshot string", idx+1)
+	}
+	return v, nil
 }
 
 // TestEnduranceGCProgressLeg is the reference's counter-proven GC
 // proof: collected advancing on every node with no GC-attributed
-// engine error. Not wired: the leg needs writing against the health
-// collected_transactions counter plus Node.RetentionCollect.
+// engine error. Each node writes converging rows while every node
+// collects; the health retention.collected_transactions counter
+// (durable, cumulative floors moved) must advance on all three nodes
+// and no GC-shaped engine error may latch.
 func TestEnduranceGCProgressLeg(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	t.Skip("harness: endurance GC leg not wired (prove collected advancing per node)")
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "endurance-gc",
+		NumNodes: 3,
+	})
+	if err != nil {
+		t.Fatalf("cluster setup: %v", err)
+	}
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+
+	for i := 0; i < 3; i++ {
+		if _, err := cluster.Node(i).Simple(
+			"CREATE TABLE IF NOT EXISTS records(id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL DEFAULT '')"); err != nil {
+			t.Fatalf("node %d create records: %v", i, err)
+		}
+		if err := cluster.Node(i).SetTableReplicated("records", true); err != nil {
+			t.Fatalf("node %d replicate records: %v", i, err)
+		}
+		// Small floor so every collect round moves it (the main
+		// chaos run raises this to keep rejoins on the log path;
+		// this leg wants the opposite).
+		if _, err := cluster.Node(i).Simple(
+			"INSERT INTO murmur_config(name,value) VALUES('retention_min_kept','10') ON CONFLICT(name) DO UPDATE SET value=excluded.value"); err != nil {
+			t.Fatalf("node %d retention floor: %v", i, err)
+		}
+	}
+	first := make([]uint64, 3)
+	maxSeen := make([]uint64, 3)
+	// sample records the per-node max and fails on GC-shaped errors;
+	// baseline snapshots the pre-write floors.
+	sample := func(into []uint64) {
+		t.Helper()
+		for i := 0; i < 3; i++ {
+			collected, lastErr, err := gcSample(cluster, i)
+			if err != nil {
+				t.Fatalf("node %d gc sample: %v", i, err)
+			}
+			into[i] = collected
+			if collected > maxSeen[i] {
+				maxSeen[i] = collected
+			}
+			if isGCError(lastErr) {
+				t.Fatalf("node %d GC-shaped engine error: %q", i, lastErr)
+			}
+		}
+	}
+	sample(first)
+	const rounds = 5
+	const rowsPerNodeRound = 4
+	total := 0
+	for r := 0; r < rounds; r++ {
+		for node := 0; node < 3; node++ {
+			for k := 0; k < rowsPerNodeRound; k++ {
+				id := total
+				total++
+				if _, err := cluster.Node(node).Execute(
+					"INSERT INTO records(id,name) VALUES($1,$2)",
+					int64(id), fmt.Sprintf("gc-%d", id)); err != nil {
+					t.Fatalf("round %d node %d insert: %v", r, node, err)
+				}
+			}
+			if err := cluster.Node(node).Flush(); err != nil {
+				t.Fatalf("round %d node %d flush: %v", r, node, err)
+			}
+		}
+		if err := goharness.AssertRows(cluster, []int{0, 1, 2},
+			"SELECT COUNT(*) FROM records",
+			[][]string{{strconv.Itoa(total)}}); err != nil {
+			t.Fatalf("round %d converge %d rows: %v", r, total, err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, _, err := cluster.Node(i).RetentionCollect(); err != nil {
+				t.Fatalf("round %d node %d collect: %v", r, i, err)
+			}
+		}
+		sample(make([]uint64, 3))
+	}
+	for i := 0; i < 3; i++ {
+		if !(maxSeen[i] > first[i]) {
+			t.Fatalf("node %d collected never advanced (first=%d max=%d)",
+				i, first[i], maxSeen[i])
+		}
+		if maxSeen[i] == 0 {
+			t.Fatalf("node %d collected stayed zero", i)
+		}
+	}
+	failed = false
+}
+
+// gcSample returns the GC counters for one node: the durable
+// collected_transactions counter plus the latest engine error latch.
+func gcSample(cluster *goharness.Cluster, idx int) (uint64, string, error) {
+	h, err := cluster.Node(idx).ShowHealth()
+	if err != nil {
+		return 0, "", err
+	}
+	m, ok := h.(map[string]any)
+	if !ok {
+		return 0, "", fmt.Errorf("node%d health is not an object", idx+1)
+	}
+	ret, ok := m["retention"].(map[string]any)
+	if !ok {
+		return 0, "", fmt.Errorf("node%d health has no retention block", idx+1)
+	}
+	collected, ok := ret["collected_transactions"].(float64)
+	if !ok {
+		return 0, "", fmt.Errorf("node%d health has no collected counter", idx+1)
+	}
+	var lastErr string
+	if repl, ok := m["replication"].(map[string]any); ok {
+		if s, ok := repl["last_error"].(string); ok {
+			lastErr = s
+		}
+	}
+	return uint64(collected), lastErr, nil
+}
+
+// isGCError reports whether an engine error string plausibly comes
+// from log-GC collection (reference matcher).
+func isGCError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "retention") || strings.Contains(lower, "collect") ||
+		strings.Contains(lower, "gc_") || strings.Contains(lower, "prune")
 }

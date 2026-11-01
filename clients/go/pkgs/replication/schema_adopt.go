@@ -298,19 +298,20 @@ func SchemaDiff(local, remote []byte) (SchemaDiffResult, error) {
 			return SchemaDiffResult{Incompatible: "table constraint change: " + rp.Table}, nil
 		}
 		for _, bc := range before {
-			found := false
 			for _, ac := range after {
 				if ac.name == bc.name {
-					found = true
 					if ac.def != bc.def {
 						return SchemaDiffResult{Incompatible: "column redefined: " + rp.Table + "." + bc.name}, nil
 					}
 					break
 				}
 			}
-			if !found {
-				return SchemaDiffResult{Incompatible: "column dropped: " + rp.Table + "." + bc.name}, nil
-			}
+			// Local-extra columns are kept, not conflicts: the
+			// peer adopts them when it sees our manifest, so
+			// divergent additive branches merge through mutual
+			// adoption (reference network.go applies remote
+			// extras and never faults local extras). Only
+			// shared columns must agree.
 		}
 		for _, ac := range after {
 			known := false
@@ -325,18 +326,10 @@ func SchemaDiff(local, remote []byte) (SchemaDiffResult, error) {
 			}
 		}
 	}
-	for _, lp := range localPairs {
-		kept := false
-		for _, rp := range remotePairs {
-			if rp.Table == lp.Table {
-				kept = true
-				break
-			}
-		}
-		if !kept {
-			return SchemaDiffResult{Incompatible: "table retired: " + lp.Table}, nil
-		}
-	}
+	// Local-extra tables are kept, not conflicts (same merge rule as
+	// columns above; the reference guards destructive DDL at write
+	// time instead, which this stack tracks as the replicated-DDL
+	// guard gap).
 	return SchemaDiffResult{Additive: true, Delta: delta}, nil
 }
 
@@ -353,8 +346,12 @@ func equalStrings(a, b []string) bool {
 }
 
 // PullerCompatible is the donor-side one-sided check. The puller may
-// carry local-extra tables (drop-never legacy); every donor table
-// must exist on the puller with byte-identical DDL.
+// carry local-extra tables and columns; every donor table must exist
+// on the puller with the same column set (name and normalized
+// definition) and equal constraints. The comparison is
+// order-insensitive so merged branches with different column order
+// stay compatible: cr-sqlite changes address columns by name, so
+// order never affects data flow. Unparseable DDL fails closed.
 func PullerCompatible(local, puller []byte) (bool, error) {
 	localPairs, err := DecodeSchemaPairs(local)
 	if err != nil {
@@ -369,8 +366,38 @@ func PullerCompatible(local, puller []byte) (bool, error) {
 		pullerMap[p.Table] = p.DDL
 	}
 	for _, lp := range localPairs {
-		if ddl, ok := pullerMap[lp.Table]; !ok || ddl != lp.DDL {
+		pullerDDL, ok := pullerMap[lp.Table]
+		if !ok {
 			return false, nil
+		}
+		if pullerDDL == lp.DDL {
+			continue
+		}
+		donorCols, donorCons, ok := ddlColumns(lp.DDL)
+		if !ok {
+			return false, nil
+		}
+		haveCols, haveCons, ok := ddlColumns(pullerDDL)
+		if !ok {
+			return false, nil
+		}
+		if !equalStrings(donorCons, haveCons) {
+			return false, nil
+		}
+		for _, dc := range donorCols {
+			match := false
+			for _, hc := range haveCols {
+				if hc.name == dc.name {
+					if hc.def != dc.def {
+						return false, nil
+					}
+					match = true
+					break
+				}
+			}
+			if !match {
+				return false, nil
+			}
 		}
 	}
 	return true, nil

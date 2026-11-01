@@ -63,7 +63,7 @@ func decodeHex(s string, n int) ([]byte, error) {
 func main() {
 	var dir, idHex, groupHex, addr, ca, cert, keyPEM, unlockHex string
 	var seeds, trust strList
-	var noStart bool
+	var noStart, schemaMaster bool
 	var filesDir, filesKeyHex, filesIP string
 	var filesPort int
 	flag.StringVar(&dir, "dir", "", "node dir")
@@ -77,6 +77,7 @@ func main() {
 	flag.Var(&seeds, "seed", "bootstrap addr (repeatable)")
 	flag.Var(&trust, "trust", "trusted node hex (repeatable)")
 	flag.BoolVar(&noStart, "no-start", false, "boot without starting")
+	flag.BoolVar(&schemaMaster, "schema-master", false, "act as schema master")
 	flag.StringVar(&filesDir, "files-dir", "", "file object dir (enables files)")
 	flag.StringVar(&filesKeyHex, "files-key", "", "file store key hex")
 	flag.StringVar(&filesIP, "files-ip", "127.0.0.1", "fetch bind IP")
@@ -147,6 +148,10 @@ func main() {
 	if len(trust) > 0 {
 		raw, _ := json.Marshal([]string(trust))
 		settings["snapshot_trusted_sources"] = string(raw)
+	}
+	if schemaMaster {
+		settings["schema_master_enabled"] = "1"
+		settings["schema_master"] = idHex
 	}
 	_ = id
 	for k, v := range settings {

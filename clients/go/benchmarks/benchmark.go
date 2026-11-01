@@ -83,7 +83,7 @@ func parseArgs(args []string) options {
 		if arg == "--help" {
 			fmt.Println("Usage: benchmark [--suite=all|no-replication|crsqlite|single] [--seconds=60] [--flush-interval-ms=100] [--cache-pages=16384] [--sqlite-cache-kib=1048576]")
 			fmt.Println("                 [--compression=zstd3|zstd1..zstd22] [--cipher=aegis256|aes256gcm] [--page-size=4096] [--batch-size=1] [--replication=off|on] [--ingest=local|row|blob] [--background-threads=auto|1..256]")
-			fmt.Println("Default: 8 cases, 60 seconds each. --suite=single supports --backend=murmur|sqlite-disk.")
+			fmt.Println("Default: 8 cases, 60 seconds each. --suite=single supports --backend=murmur|murmurdb|sqlite-disk.")
 			fmt.Println("Batch/replication/ingest/backend overrides require --suite=single; row/blob ingest enables replication; --seconds measures destination active time, excluding source export/packing.")
 			os.Exit(0)
 		}
@@ -95,7 +95,7 @@ func parseArgs(args []string) options {
 			}
 		case strings.HasPrefix(arg, "--backend="):
 			o.backend = arg[len("--backend="):]
-			if o.backend != "murmur" && o.backend != "sqlite-disk" {
+			if o.backend != "murmur" && o.backend != "murmurdb" && o.backend != "sqlite-disk" {
 				fail(fmt.Errorf("invalid backend"))
 			}
 			backendOverride = true
@@ -787,7 +787,11 @@ func main() {
 			comparison(results, rep)
 		}
 	case "single":
-		run(o)
+		if o.backend == "murmurdb" {
+			runDatabaseSQL(o)
+		} else {
+			run(o)
+		}
 	}
 	fmt.Println("BENCH_SUITE_DONE")
 }

@@ -9,7 +9,17 @@
 #include <string.h>
 
 #include "sqlite3.h"
+#ifndef MURMUR_STORAGE_ONLY
 #include "../crsqlite/include/sqlite_murmur_crsqlite.h"
+#endif
+
+/* COFF weak aliases do not supply the ELF-style fallback implementations
+ * below. The standalone storage build owns these callbacks outright. */
+#ifdef MURMUR_STORAGE_ONLY
+#define MURMUR_WEAK
+#else
+#define MURMUR_WEAK __attribute__((weak))
+#endif
 
 extern "C" int nvVfsRegister(const char *name);
 extern "C" void nvCtlSetDefaults(int cache_pages, unsigned flush_ms);
@@ -17,23 +27,23 @@ extern "C" void nvCtlSetDefaults(int cache_pages, unsigned flush_ms);
 /* The native archive is also linked into Go, where cgo supplies strong
  * callback implementations. Standalone C clients need harmless defaults
  * for the Go-only PRAGMA extension hooks. */
-extern "C" __attribute__((weak)) int nvMurmurExtFileGo(
+extern "C" MURMUR_WEAK int nvMurmurExtFileGo(
     uint64_t, const char *, const char *, int, char *, size_t, size_t *);
-extern "C" __attribute__((weak)) int nvMurmurExtStoreGo(
+extern "C" MURMUR_WEAK int nvMurmurExtStoreGo(
     uint64_t, const char *, const char *, int, char *, size_t, size_t *);
-extern "C" __attribute__((weak)) void nvCloseFileGo(uint64_t);
+extern "C" MURMUR_WEAK void nvCloseFileGo(uint64_t);
 
-extern "C" __attribute__((weak)) int nvMurmurExtFileGo(
+extern "C" MURMUR_WEAK int nvMurmurExtFileGo(
     uint64_t, const char *, const char *, int, char *, size_t, size_t *out_len) {
   if (out_len) *out_len = 0;
   return SQLITE_NOTFOUND;
 }
-extern "C" __attribute__((weak)) int nvMurmurExtStoreGo(
+extern "C" MURMUR_WEAK int nvMurmurExtStoreGo(
     uint64_t, const char *, const char *, int, char *, size_t, size_t *out_len) {
   if (out_len) *out_len = 0;
   return SQLITE_NOTFOUND;
 }
-extern "C" __attribute__((weak)) void nvCloseFileGo(uint64_t) {}
+extern "C" MURMUR_WEAK void nvCloseFileGo(uint64_t) {}
 
 extern "C" {
 
@@ -73,6 +83,7 @@ int murmur_vfs_register(int cache_pages, unsigned flush_interval_ms) {
   return rc;
 }
 
+#ifndef MURMUR_STORAGE_ONLY
 int murmur_crsqlite_init(struct sqlite3 *db) {
   if (!db) return SQLITE_MISUSE;
   char *error = nullptr;
@@ -80,5 +91,6 @@ int murmur_crsqlite_init(struct sqlite3 *db) {
   sqlite3_free(error);
   return rc;
 }
+#endif
 
 }  // extern "C"

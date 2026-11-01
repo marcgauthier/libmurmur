@@ -419,11 +419,26 @@ murmur_sync_status_t murmur_serve_handshake(
       return MURMUR_SYNC_AUTH;
     }
     if (memcmp(got.msg.schema, schema, 32) != 0) {
-      murmur_serve_msg_free(&got);
-      set_detail(detail_out,
-                 "CRR schema mismatch; provision matching table definitions");
-      set_sqlrc(sqlrc, SQLITE_OK);
-      return MURMUR_SYNC_PROTOCOL;
+      /* Go Handshake: schemas are a fast-fail hint only when
+       * adoption is off; adopters proceed and converge through
+       * manifests. Rejecting unconditionally deadlocks stale
+       * rejoiners: adoption needs the session the handshake
+       * would refuse to establish. */
+      murmur_schema_params_t hp;
+      memset(&hp, 0, sizeof(hp));
+      st = murmur_schema_params_from(db, &hp, sqlrc);
+      if (st != MURMUR_SYNC_OK) {
+        murmur_serve_msg_free(&got);
+        native_detail(db, st, detail_out);
+        return st;
+      }
+      if (!hp.accept_remote) {
+        murmur_serve_msg_free(&got);
+        set_detail(detail_out,
+                   "CRR schema mismatch; provision matching table definitions");
+        set_sqlrc(sqlrc, SQLITE_OK);
+        return MURMUR_SYNC_PROTOCOL;
+      }
     }
     st = murmur_serve_write_msg(io, &hello, detail_out, sqlrc);
     if (st != MURMUR_SYNC_OK) {
@@ -450,11 +465,22 @@ murmur_sync_status_t murmur_serve_handshake(
     return MURMUR_SYNC_AUTH;
   }
   if (memcmp(got.msg.schema, schema, 32) != 0) {
-    murmur_serve_msg_free(&got);
-    set_detail(detail_out,
-               "CRR schema mismatch; provision matching table definitions");
-    set_sqlrc(sqlrc, SQLITE_OK);
-    return MURMUR_SYNC_PROTOCOL;
+    /* See above: fast-fail only when adoption is off. */
+    murmur_schema_params_t hp;
+    memset(&hp, 0, sizeof(hp));
+    st = murmur_schema_params_from(db, &hp, sqlrc);
+    if (st != MURMUR_SYNC_OK) {
+      murmur_serve_msg_free(&got);
+      native_detail(db, st, detail_out);
+      return st;
+    }
+    if (!hp.accept_remote) {
+      murmur_serve_msg_free(&got);
+      set_detail(detail_out,
+                 "CRR schema mismatch; provision matching table definitions");
+      set_sqlrc(sqlrc, SQLITE_OK);
+      return MURMUR_SYNC_PROTOCOL;
+    }
   }
   *incarnation_out = got.msg.incarnation;
   *addr_out = got.msg.addr;
@@ -670,14 +696,29 @@ murmur_sync_status_t murmur_serve_pull_once(murmur_engine_t *e,
   /* next.after borrows reply.owned: keep reply alive through apply,
    * which re-encodes the cursor into progress. Freeing first stores
    * heap garbage that later fails cursor decode on every sweep. */
+  struct timespec apply_start, apply_end;
+  clock_gettime(CLOCK_MONOTONIC, &apply_start);
   st = murmur_sync_apply(db, peer, &batch_site, &cursor.cursor, &next, bytes,
                          digest, sqlrc);
+  clock_gettime(CLOCK_MONOTONIC, &apply_end);
   murmur_serve_msg_free(&reply);
   murmur_sync_cursor_free(&cursor);
   if (st != MURMUR_SYNC_OK) {
     gauge_release(e, 0, bytes);
     native_detail(db, st, detail_out);
     return st;
+  }
+  {
+    uint64_t elapsed =
+        (uint64_t)(apply_end.tv_sec - apply_start.tv_sec) * 1000000000u +
+        (uint64_t)(apply_end.tv_nsec - apply_start.tv_nsec);
+    pthread_mutex_lock(&e->mu);
+    if (bytes > 0) {
+      e->recv_batches++;
+    }
+    e->apply_bytes += bytes;
+    e->apply_nanos += elapsed;
+    pthread_mutex_unlock(&e->mu);
   }
   murmur_serve_touch_peer(e, peer, NULL, 0);
   murmur_msg_t ack;
@@ -1436,6 +1477,7 @@ static murmur_sync_status_t fetch_inner(murmur_engine_t *e,
       murmur_serve_touch_peer(e, peer, m.progress, m.n_progress);
       pthread_mutex_lock(&e->mu);
       e->applied++;
+      e->snapshots++;
       pthread_mutex_unlock(&e->mu);
       *transfer_out = transfer;
       murmur_tx_manifest_free(&m);
@@ -1977,5 +2019,6 @@ void murmur_serve_push_schema(murmur_engine_t *e, const murmur_node_t *peer,
   memcpy(e->schema_sent[i].digest, digest, 32);
   e->schema_sent[i].sequence = seq;
   e->sent++;
+  e->schema_pushes++;
   pthread_mutex_unlock(&e->mu);
 }

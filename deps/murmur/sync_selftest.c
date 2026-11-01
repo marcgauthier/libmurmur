@@ -1325,17 +1325,15 @@ static void test_schema_diff(void) {
   /* incompatible kinds arrive as data (OK + reason), like Go */
   static const char *bad_ddls[] = {
       "CREATE TABLE t(a TEXT)",                /* redefined */
-      "CREATE TABLE t(b TEXT)",                /* dropped a */
       "CREATE TABLE t(a INT, PRIMARY KEY(a))", /* constraint */
       "CREATE TABLE t(oops",                   /* unparseable remote */
   };
   static const char *bad_reason[] = {
       "column redefined: t.a",
-      "column dropped: t.a",
       "table constraint change: t",
       "unparseable remote DDL: t",
   };
-  for (size_t i = 0; i < 4; i++) {
+  for (size_t i = 0; i < 3; i++) {
     const char *bt[] = {"t", "u"};
     const char *bd[] = {bad_ddls[i], "CREATE TABLE u(a INT)"};
     size_t blen = 0;
@@ -1348,7 +1346,7 @@ static void test_schema_diff(void) {
           "incompat %zu got <%s>", i, d.incompatible ? d.incompatible : "?");
     murmur_schema_diff_free(&d);
     /* swapped roles: the same DDL is unparseable local */
-    if (i == 3) {
+    if (i == 2) {
       memset(&d, 0, sizeof(d));
       CHECK(murmur_schema_diff(bad, blen, local, llen, &d, &sqlrc) ==
                       MURMUR_SYNC_OK &&
@@ -1360,7 +1358,42 @@ static void test_schema_diff(void) {
     }
     free(bad);
   }
-  /* retired table */
+  /* local-extra column: kept, subset remote adopts as a no-op */
+  {
+    const char *bt[] = {"t", "u"};
+    const char *bd[] = {"CREATE TABLE t(b TEXT)", "CREATE TABLE u(a INT)"};
+    size_t blen = 0;
+    uint8_t *sub = pairs_blob(bt, bd, 2, &blen);
+    memset(&d, 0, sizeof(d));
+    CHECK(murmur_schema_diff(coladd, clen, sub, blen, &d, &sqlrc) ==
+                  MURMUR_SYNC_OK &&
+              d.additive && d.n_tables == 0 && d.n_columns == 0 &&
+              !d.incompatible,
+          "subset st=%d", sqlrc);
+    murmur_schema_diff_free(&d);
+    free(sub);
+  }
+  /* divergent branches merge: local extras kept, remote extras adopted */
+  {
+    const char *bt[] = {"t", "u"};
+    const char *bd[] = {"CREATE TABLE t(a INT, c TEXT)",
+                        "CREATE TABLE u(a INT)"};
+    size_t blen = 0;
+    uint8_t *right = pairs_blob(bt, bd, 2, &blen);
+    memset(&d, 0, sizeof(d));
+    CHECK(murmur_schema_diff(coladd, clen, right, blen, &d, &sqlrc) ==
+                  MURMUR_SYNC_OK &&
+              d.additive && d.n_tables == 0 && d.n_columns == 1,
+          "branch st=%d", sqlrc);
+    if (d.n_columns == 1) {
+      CHECK(strcmp(d.add_columns[0].table, "t") == 0 &&
+                strcmp(d.add_columns[0].def, "c TEXT") == 0,
+            "branch ent <%s>", d.add_columns[0].def);
+    }
+    murmur_schema_diff_free(&d);
+    free(right);
+  }
+  /* retired table: kept, no-op adopt */
   const char *rt[] = {"t"};
   const char *rd[] = {"CREATE TABLE t(a INT)"};
   size_t rlen = 0;
@@ -1368,9 +1401,9 @@ static void test_schema_diff(void) {
   memset(&d, 0, sizeof(d));
   CHECK(murmur_schema_diff(local, llen, ret, rlen, &d, &sqlrc) ==
                 MURMUR_SYNC_OK &&
-            !d.additive && d.incompatible &&
-            strcmp(d.incompatible, "table retired: u") == 0,
-        "retired got <%s>", d.incompatible ? d.incompatible : "?");
+            d.additive && d.n_tables == 0 && d.n_columns == 0 &&
+            !d.incompatible,
+        "retired st=%d", sqlrc);
   murmur_schema_diff_free(&d);
   free(ret);
   /* garbage fails closed */
@@ -1397,8 +1430,37 @@ static void test_schema_diff(void) {
         "puller missing");
   CHECK(murmur_puller_compatible(local, llen, coladd, clen, &compat, &sqlrc) ==
                 MURMUR_SYNC_OK &&
+            compat == 1,
+        "puller extra column");
+  CHECK(murmur_puller_compatible(coladd, clen, local, llen, &compat, &sqlrc) ==
+                MURMUR_SYNC_OK &&
             compat == 0,
-        "puller drift");
+        "puller missing column");
+  /* same shape, different column order: merged branches stay compatible */
+  {
+    const char *bt[] = {"t", "u"};
+    const char *bd[] = {"CREATE TABLE t(b TEXT, a INT)",
+                        "CREATE TABLE u(a INT)"};
+    size_t blen = 0;
+    uint8_t *reord = pairs_blob(bt, bd, 2, &blen);
+    CHECK(murmur_puller_compatible(coladd, clen, reord, blen, &compat,
+                                   &sqlrc) == MURMUR_SYNC_OK &&
+              compat == 1,
+          "puller reorder");
+    free(reord);
+  }
+  /* redefined column still fails */
+  {
+    const char *bt[] = {"t", "u"};
+    const char *bd[] = {"CREATE TABLE t(a TEXT)", "CREATE TABLE u(a INT)"};
+    size_t blen = 0;
+    uint8_t *redef = pairs_blob(bt, bd, 2, &blen);
+    CHECK(murmur_puller_compatible(local, llen, redef, blen, &compat,
+                                   &sqlrc) == MURMUR_SYNC_OK &&
+              compat == 0,
+          "puller redefined");
+    free(redef);
+  }
   CHECK(murmur_puller_compatible(local, llen, garbage, sizeof(garbage),
                                  &compat,
                                  &sqlrc) == MURMUR_SYNC_INVALID,
@@ -3670,7 +3732,7 @@ static void test_schemaadopt(void) {
                                          &sqlrc) == MURMUR_SYNC_OK &&
                 dec == MURMUR_SCHEMA_ADOPT,
             "adopt check adopt dec=%d", (int)dec);
-      /* destructive reverse delta records without adopting */
+      /* subset reverse delta adopts as a no-op (local extras kept) */
       murmur_signed_schema_t r2;
       memset(&r2, 0, sizeof(r2));
       r2.database = database;
@@ -3681,8 +3743,8 @@ static void test_schemaadopt(void) {
       CHECK(murmur_schema_check_manifest(full, &params, &own, remote, rloc,
                                          &r2, &database, &src, &dec,
                                          &sqlrc) == MURMUR_SYNC_OK &&
-                dec == MURMUR_SCHEMA_RECORD,
-            "adopt check record dec=%d", (int)dec);
+                dec == MURMUR_SCHEMA_ADOPT,
+            "adopt check subset dec=%d", (int)dec);
       /* opt-out records additive manifests too */
       murmur_schema_params_t off = params;
       off.accept_remote = 0;
@@ -4034,10 +4096,16 @@ static void test_serve_handshake(void) {
   free(inc.detail);
   free(outc.detail);
   mempair_destroy(&mp);
-  /* Schema mismatch. */
+  /* Schema mismatch. Reject only when adoption is off (Go
+   * Handshake: schemas are a fast-fail hint then); adopters
+   * proceed and converge through manifests. */
   make_sync_table(dc, "u");
   murmur_engine_destroy(&ec);
   engine_test_init(&ec, dc, &group, &nc, &sc, 33, "127.0.0.1:3333");
+  exec_ok(da,
+          "INSERT INTO murmur_config(name,value) "
+          "VALUES('accept_remote_schema','0')",
+          "hs adoption off");
   mempair_init(&mp);
   hs_arg_t ins, outs;
   hs_arg_init(&ins, &ea, &nc, &mp.a_io, 0);
@@ -4049,6 +4117,20 @@ static void test_serve_handshake(void) {
         "hs schema detail");
   free(ins.detail);
   free(outs.detail);
+  mempair_destroy(&mp);
+  exec_ok(da, "UPDATE murmur_config SET value='1' WHERE name='accept_remote_schema'",
+          "hs adoption on");
+  mempair_init(&mp);
+  hs_arg_t ina2, outb2;
+  hs_arg_init(&ina2, &ea, &nc, &mp.a_io, 0);
+  hs_arg_init(&outb2, &ec, &na, &mp.b_io, 1);
+  hs_pair(&ina2, &outb2, &mp);
+  CHECK(ina2.st == MURMUR_SYNC_OK, "hs adopter incoming status %d",
+        (int)ina2.st);
+  CHECK(outb2.st == MURMUR_SYNC_OK, "hs adopter outgoing status %d",
+        (int)outb2.st);
+  free(ina2.detail);
+  free(outb2.detail);
   mempair_destroy(&mp);
   /* Wrong first tag. */
   mempair_init(&mp);
@@ -4477,7 +4559,6 @@ static void test_serve_snapshot(void) {
         "snap fetch %s", detail ? detail : "");
   CHECK(count_rows(db, "SELECT COUNT(*) FROM t") == 2, "snap rows");
   CHECK(eb.applied == 1, "snap applied");
-  CHECK(ea.sent == 1, "snap sent");
   murmur_node_t zero;
   memset(&zero, 0, sizeof(zero));
   CHECK(!murmur_node_eq(&transfer, &zero), "snap transfer");
@@ -4493,6 +4574,9 @@ static void test_serve_snapshot(void) {
   free(detail);
   detail = NULL;
   loop_stop(&ls);
+  /* The fetcher can finish reading before the donor updates its counter.
+   * Join the donor thread before inspecting donor-owned state. */
+  CHECK(ea.sent == 1, "snap sent");
   /* Donor reject text reaches the fetcher verbatim. */
   sqlite3 *dc = open_crr();
   make_sync_table(dc, "t");

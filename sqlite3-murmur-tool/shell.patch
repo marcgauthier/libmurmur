@@ -1,0 +1,265 @@
+--- shell.c
++++ shell.c
+@@ -159,6 +159,7 @@
+ #include <stdint.h>
+ #include <time.h>
+ #include "sqlite3.h"
++#include "tool.h"
+ typedef sqlite3_int64 i64;
+ typedef sqlite3_uint64 u64;
+ typedef unsigned char u8;
+@@ -29773,46 +29774,9 @@
+ ** the type cannot be determined from content.
+ */
+ int deduceDatabaseType(const char *zName, int dfltZip, int openFlags){
+-  FILE *f;
+-  size_t n;
+-  int rc = SHELL_OPEN_UNSPEC;
+-  char zBuf[100];
+-  if( access(zName,0)!=0 ) goto database_type_by_name;
+-  if( isDatabaseFile(zName, openFlags) ){
+-    rc = SHELL_OPEN_NORMAL;
+-  }
+-  if( rc==SHELL_OPEN_NORMAL ) return SHELL_OPEN_NORMAL;
+-  f = sqlite3_fopen(zName, "rb");
+-  if( f==0 ) goto database_type_by_name;
+-  n = fread(zBuf, 16, 1, f);
+-  if( n==1 && memcmp(zBuf, "SQLite format 3", 16)==0 ){
+-    fclose(f);
+-    return SHELL_OPEN_NORMAL;
+-  }
+-  fseek(f, -25, SEEK_END);
+-  n = fread(zBuf, 25, 1, f);
+-  if( n==1 && memcmp(zBuf, "Start-Of-SQLite3-", 17)==0 ){
+-    rc = SHELL_OPEN_APPENDVFS;
+-  }else{
+-    fseek(f, -22, SEEK_END);
+-    n = fread(zBuf, 22, 1, f);
+-    if( n==1 && zBuf[0]==0x50 && zBuf[1]==0x4b && zBuf[2]==0x05
+-       && zBuf[3]==0x06 ){
+-      rc = SHELL_OPEN_ZIPFILE;
+-    }else if( n==0 && dfltZip && sqlite3_strlike("%.zip",zName,0)==0 ){
+-      rc = SHELL_OPEN_ZIPFILE;
+-    }
+-  }
+-  fclose(f);
+-  return rc;
+-
+-database_type_by_name:
+-  if( dfltZip && sqlite3_strlike("%.zip",zName,0)==0 ){
+-    rc = SHELL_OPEN_ZIPFILE;
+-  }else{
+-    rc = SHELL_OPEN_NORMAL;
+-  }
+-  return rc;
++  /* Persistent names are Murmur directories; do not sniff file contents. */
++  (void)zName; (void)dfltZip; (void)openFlags;
++  return SHELL_OPEN_NORMAL;
+ }
+ 
+ /*
+@@ -30049,6 +30013,11 @@
+       if( p->openFlags==0 ) p->openFlags = SQLITE_OPEN_CREATE;
+       p->openFlags |= SQLITE_OPEN_READWRITE;
+     }
++    if( p->openMode!=SHELL_OPEN_NORMAL ){
++      eputz("Error: Murmur does not support append/ZIP/deserialize database modes.\n");
++      if( (openFlags & OPEN_DB_KEEPALIVE)==0 ) cli_exit(1);
++      return;
++    }
+     switch( p->openMode ){
+       case SHELL_OPEN_APPENDVFS: {
+         sqlite3_open_v2(zDbFilename, &p->db, p->openFlags, "apndvfs");
+@@ -30075,6 +30044,7 @@
+       if( (openFlags & OPEN_DB_KEEPALIVE)==0 ){
+         cli_exit(1);
+       }
++      ++p->nErr;
+       sqlite3_close(p->db);
+       sqlite3_open(":memory:", &p->db);
+       if( p->db==0 || SQLITE_OK!=sqlite3_errcode(p->db) ){
+@@ -35032,6 +35002,7 @@
+ 
+ #ifndef SQLITE_SHELL_FIDDLE
+   if( (c=='b' && n>=3 && cli_strncmp(azArg[0], "backup", n)==0)
++   || (c=='c' && n>=1 && cli_strncmp(azArg[0], "clone", n)==0)
+    || (c=='s' && n>=3 && cli_strncmp(azArg[0], "save", n)==0)
+   ){
+     const char *zDestFile = 0;
+@@ -35047,10 +35018,12 @@
+       if( z[0]=='-' ){
+         if( z[1]=='-' ) z++;
+         if( cli_strcmp(z, "-append")==0 ){
+-          zVfs = "apndvfs";
++          eputz("Error: Murmur backups do not support --append.\n");
++          return 1;
+         }else
+         if( cli_strcmp(z, "-async")==0 ){
+-          bAsync = 1;
++          eputz("Error: Murmur backups do not support --async.\n");
++          return 1;
+         }else
+         {
+           dotCmdError(p, j, "unknown option", "should be -append or -async");
+@@ -35071,6 +35044,12 @@
+       return 1;
+     }
+     if( zDb==0 ) zDb = "main";
++    if( c=='c' && access(zDestFile,0)==0 ){
++      eputz("Error: clone destination already exists.\n");
++      return 1;
++    }
++    /* Validate the source before creating a destination. */
++    open_db(p, 0);
+     rc = sqlite3_open_v2(zDestFile, &pDest,
+                   SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE, zVfs);
+     if( rc!=SQLITE_OK ){
+@@ -35090,7 +35069,10 @@
+       return 1;
+     }
+     while(  (rc = sqlite3_backup_step(pBackup,100))==SQLITE_OK ){}
+-    sqlite3_backup_finish(pBackup);
++    {
++      int finishRc = sqlite3_backup_finish(pBackup);
++      if( rc==SQLITE_DONE && finishRc!=SQLITE_OK ) rc = finishRc;
++    }
+     if( rc==SQLITE_DONE ){
+       rc = 0;
+     }else{
+@@ -35528,7 +35510,7 @@
+ 
+ #ifndef SQLITE_SHELL_FIDDLE
+   if( c=='e' && cli_strncmp(azArg[0], "exit", n)==0 ){
+-    if( nArg>1 && (rc = (int)integerValue(azArg[1]))!=0 ) cli_exit(rc);
++    if( nArg>1 ) murmur_tool_exit_code((int)integerValue(azArg[1]));
+     rc = 2;
+   }else
+ #endif
+@@ -36231,6 +36213,11 @@
+       }
+     }
+ 
++    if( newFlag || (openMode!=SHELL_OPEN_UNSPEC && openMode!=SHELL_OPEN_NORMAL) ){
++      eputz("Error: Murmur does not support .open --new or append/ZIP/deserialize modes.\n");
++      rc = 1;
++      goto meta_command_exit;
++    }
+     /* Close the existing database */
+     session_close_all(p, -1);
+     close_db(p->db);
+@@ -36272,7 +36259,9 @@
+         zNewFilename = 0;
+       }
+       p->pAuxDb->zDbFilename = zNewFilename;
++      int previousErrors = p->nErr;
+       open_db(p, OPEN_DB_KEEPALIVE);
++      if( p->nErr!=previousErrors ) rc = 1;
+       if( p->db==0 ){
+         cli_printf(stderr,"Error: cannot open '%s'\n", zNewFilename);
+         sqlite3_free(zNewFilename);
+@@ -36609,7 +36598,7 @@
+       rc = 1;
+       goto meta_command_exit;
+     }
+-    rc = sqlite3_open(zSrcFile, &pSrc);
++    rc = sqlite3_open_v2(zSrcFile, &pSrc, SQLITE_OPEN_READONLY, "sqlite-murmur");
+     if( rc!=SQLITE_OK ){
+       cli_printf(stderr,"Error: cannot open \"%s\"\n", zSrcFile);
+       close_db(pSrc);
+@@ -36629,7 +36618,10 @@
+         sqlite3_sleep(100);
+       }
+     }
+-    sqlite3_backup_finish(pBackup);
++    {
++      int finishRc = sqlite3_backup_finish(pBackup);
++      if( rc==SQLITE_DONE && finishRc!=SQLITE_OK ) rc = finishRc;
++    }
+     if( rc==SQLITE_DONE ){
+       rc = 0;
+     }else if( rc==SQLITE_BUSY || rc==SQLITE_LOCKED ){
+@@ -38503,6 +38495,7 @@
+   saved_lineno = p->lineno;
+   p->lineno = 0;
+   while( errCnt==0 || !bail_on_error || (p->in==0 && stdin_is_interactive) ){
++    if( murmur_tool_exiting() ) break;
+     fflush(p->out);
+     zLine = one_input_line(p, zLine, zSql, nSql>0);
+     if( zLine==0 ){
+@@ -38758,11 +38751,11 @@
+     if( stdin_is_interactive ){
+       cli_printf(stderr,"-- Loading resources from %s\n", sqliterc);
+     }
+-    if( process_input(p, sqliterc) && bail_on_error ) cli_exit(1);
++    if( process_input(p, sqliterc) && bail_on_error ) murmur_tool_exit_code(1);
+     fclose(p->in);
+   }else if( sqliterc_override!=0 ){
+     cli_printf(stderr,"cannot open: \"%s\"\n", sqliterc);
+-    if( bail_on_error ) cli_exit(1);
++    if( bail_on_error ) murmur_tool_exit_code(1);
+   }
+   p->in = inSaved;
+   p->lineno = savedLineno;
+@@ -38844,8 +38837,9 @@
+ ;
+ static void usage(int showDetail){
+   cli_printf(stderr,"Usage: %s [OPTIONS] [FILENAME [SQL...]]\n"
+-       "FILENAME is the name of an SQLite database. A new database is created\n"
+-       "if the file does not previously exist. Defaults to :memory:.\n", Argv0);
++       "FILENAME is a Murmur store directory, created if missing.\n"
++       "Defaults to :memory:.\n", Argv0);
++  murmur_tool_usage();
+   if( showDetail ){
+     cli_printf(stderr,"OPTIONS include:\n%s", zOptions);
+   }else{
+@@ -39386,7 +39380,7 @@
+     vfstrace_register("trace",0,vfstraceOut, &data, 1);
+   }
+ #ifndef SQLITE_SHELL_FIDDLE
+-  sqlite3_appendvfs_init(0,0,0);
++  /* Murmur-only CLI: append VFS is intentionally not registered. */
+ #ifdef SQLITE_DEBUG
+   sqlite3_auto_extension( (void(*)(void))auto_ext_leak_tester );
+ #endif
+@@ -39407,6 +39401,7 @@
+   ** try to process it.
+   */
+   if( !noInit ) process_sqliterc(&data,zInitFile);
++  if( murmur_tool_exiting() ) goto shell_main_exit;
+ 
+   /* Make a second pass through the command-line arguments and set
+   ** options.  This second pass is delayed until after the initialization
+@@ -39526,6 +39521,7 @@
+     }else if( cli_strcmp(z,"-version")==0 ){
+       cli_printf(stdout, "%s %s (%d-bit)\n",
+             sqlite3_libversion(), sqlite3_sourceid(), 8*(int)sizeof(char*));
++      cli_printf(stdout, "libmurmur storage (sqlite3-murmur)\n");
+       rc = 0;
+       goto shell_main_exit;
+     }else if( cli_strcmp(z,"-interactive")==0 ){
+@@ -39630,7 +39626,7 @@
+     ** command-line inputs, except for the argToSkip argument which contains
+     ** the database filename.
+     */
+-    for(i=0; i<nCmd; i++){
++    for(i=0; i<nCmd && !murmur_tool_exiting(); i++){
+       echo_group_input(&data, azCmd[i]);
+       if( isScriptFile(azCmd[i],0) ){
+         FILE *inSaved = data.in;
+@@ -39683,6 +39679,7 @@
+             "SQLite version %s %.19s\n" /*extra-version-info*/
+             "Enter \".help\" for usage hints.\n",
+             sqlite3_libversion(), sqlite3_sourceid());
++      cli_printf(stdout, "libmurmur storage: encrypted RocksDB directories\n");
+       if( warnInmemoryDb ){
+         sputz(stdout, "Connected to a ");
+         printBold("transient in-memory database");
+@@ -39795,7 +39792,7 @@
+ #else /* SQLITE_SHELL_FIDDLE... */
+   shell_main_exit:
+ #endif
+-  return rc;
++  return murmur_tool_status(rc);
+ }
+ 
+ 

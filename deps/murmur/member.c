@@ -579,14 +579,21 @@ void murmur_mship_gossip(murmur_mship_t *m, murmur_word_fn wf, void *wctx) {
 }
 
 void murmur_mship_probe(murmur_mship_t *m, uint64_t now_ms, murmur_word_fn wf,
-                        void *wctx) {
+                        void *wctx, size_t *sent_out, size_t *lost_out) {
   size_t pend_cap = murmur_view_pending(m->view) + 1;
   murmur_probe_req_t *lost =
       (murmur_probe_req_t *)malloc(pend_cap * sizeof(*lost));
   if (!lost) {
+    if (sent_out) {
+      *sent_out = 0;
+    }
+    if (lost_out) {
+      *lost_out = 0;
+    }
     return;
   }
   size_t n_lost = murmur_view_expire(m->view, now_ms, lost, pend_cap);
+  size_t n_sent = 0;
   if (m->n_conns > 0) {
     uint64_t slot = 0;
     if (murmur_below(wf, wctx, (uint64_t)m->n_conns, &slot) == 0) {
@@ -619,6 +626,7 @@ void murmur_mship_probe(murmur_mship_t *m, uint64_t now_ms, murmur_word_fn wf,
       pkt.members = members;
       pkt.n_members = n;
       send_packet(m, target, &pkt);
+      n_sent++;
     }
   }
   for (size_t r = 0; r < n_lost; r++) {
@@ -651,6 +659,12 @@ void murmur_mship_probe(murmur_mship_t *m, uint64_t now_ms, murmur_word_fn wf,
     free(relays);
   }
   free(lost);
+  if (sent_out) {
+    *sent_out = n_sent;
+  }
+  if (lost_out) {
+    *lost_out = n_lost;
+  }
 }
 
 /* Envelope database check. Callers also check sender-vs-peer and the

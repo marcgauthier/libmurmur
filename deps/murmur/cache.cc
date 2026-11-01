@@ -14,7 +14,12 @@ PageCache::~PageCache() { clear(); }
 void PageCache::wipe(uint8_t *p, size_t n) {
   // explicit_bzero: vectorized like memset but never elided (7% of
   // benchmark CPU was volatile byte-loop wipes on the seal path).
+#ifdef _WIN32
+  volatile unsigned char *v = (volatile unsigned char *)p;
+  while (n--) *v++ = 0;
+#else
   explicit_bzero(p, n);
+#endif
 }
 
 void PageCache::linkClean(std::list<Entry>::iterator it) {

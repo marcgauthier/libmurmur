@@ -8,14 +8,18 @@
 // full ordered rows instead. Typed reads go through Simple string
 // projections (hex(payload), IS NULL) rather than typed accessors.
 // Transaction-control words are real SQLite transactions on this
-// stack (not documented no-ops), managed primary keys, ALTER TABLE on
-// replicated tables, CRDT merge policies, and snapshot catch-up have
-// no native equivalent, so those legs are skipped with named harness
-// gaps.
+// stack (not documented no-ops). Managed primary keys and CRDT merge
+// policies have no native equivalent, so those legs are skipped with
+// named harness gaps. Concurrent additive branches run with the
+// cr-sqlite begin/commit-alter protocol on each side (see
+// schema-evolution); retention-snapshot recovery runs against
+// on-demand collect, with the snapshot proved by receiver status
+// (snapshot completions count as applied batches here).
 package typedrecords
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strconv"
 	"testing"
@@ -408,11 +412,105 @@ func TestSQLFilesReplicateAndDownloadThroughTheGoClient(t *testing.T) {
 
 func TestSQLConcurrentAdditiveSchemaBranchesPreserveBothValues(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	// Blocked: the reference branches replicated schemas with
-	// concurrent additive ALTER TABLE on both sides. ALTER TABLE on
-	// replicated tables breaks CRR writes on this stack (the
-	// established schema-evolution/migration-crash gap).
-	t.Skip("harness: ALTER TABLE on replicated tables breaks CRR writes")
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "typed-records-schema-branches",
+		NumNodes: 2,
+	})
+	if err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+
+	schema(t, cluster)
+	if _, err := cluster.Node(0).Simple(
+		"INSERT INTO records(id,title) VALUES(1,'branched-record')"); err != nil {
+		t.Fatalf("seed branched record: %v", err)
+	}
+	if err := cluster.Node(0).Flush(); err != nil {
+		t.Fatalf("flush seed: %v", err)
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1},
+		"SELECT title FROM records", [][]string{{"branched-record"}}); err != nil {
+		t.Fatalf("converge seed: %v", err)
+	}
+	// Split: isolate each node with a self-only allow-list (the
+	// reference SetPeers(i, nil)).
+	for i := 0; i < 2; i++ {
+		if err := cluster.Node(i).Flush(); err != nil {
+			t.Fatalf("node %d pre-split flush: %v", i, err)
+		}
+		if err := cluster.StopNode(i); err != nil {
+			t.Fatalf("stop node %d: %v", i, err)
+		}
+		allow := `["` + cluster.NodeID(i) + `"]`
+		if _, err := cluster.Node(i).Simple(
+			"INSERT INTO murmur_config(name,value) VALUES('allowed_peers','" + allow +
+				"') ON CONFLICT(name) DO UPDATE SET value=excluded.value"); err != nil {
+			t.Fatalf("node %d isolate: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := cluster.StartNode(i); err != nil {
+			t.Fatalf("restart node %d: %v", i, err)
+		}
+	}
+	// Divergent additive branches, each inside the cr-sqlite
+	// begin/commit-alter protocol.
+	for _, sql := range []string{
+		"SELECT crsql_begin_alter('records')",
+		"ALTER TABLE records ADD COLUMN note TEXT",
+		"SELECT crsql_commit_alter('records')",
+		"UPDATE records SET note='note-from-left' WHERE id=1",
+	} {
+		if _, err := cluster.Node(0).Simple(sql); err != nil {
+			t.Fatalf("node 0 left branch %q: %v", sql, err)
+		}
+	}
+	for _, sql := range []string{
+		"SELECT crsql_begin_alter('records')",
+		"ALTER TABLE records ADD COLUMN region TEXT",
+		"SELECT crsql_commit_alter('records')",
+		"UPDATE records SET region='region-from-right' WHERE id=1",
+	} {
+		if _, err := cluster.Node(1).Simple(sql); err != nil {
+			t.Fatalf("node 1 right branch %q: %v", sql, err)
+		}
+	}
+	if _, err := cluster.Node(0).Simple("SELECT region FROM records"); err == nil {
+		t.Fatal("node 0 sees unmerged region column")
+	}
+	if _, err := cluster.Node(1).Simple("SELECT note FROM records"); err == nil {
+		t.Fatal("node 1 sees unmerged note column")
+	}
+	// Rejoin: clear the allow-lists (the reference SetPeers(i,
+	// [1-i])) and remesh.
+	for i := 0; i < 2; i++ {
+		if err := cluster.Node(i).Flush(); err != nil {
+			t.Fatalf("node %d pre-join flush: %v", i, err)
+		}
+		if err := cluster.StopNode(i); err != nil {
+			t.Fatalf("stop node %d: %v", i, err)
+		}
+		if _, err := cluster.Node(i).Simple(
+			"DELETE FROM murmur_config WHERE name='allowed_peers'"); err != nil {
+			t.Fatalf("node %d rejoin: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := cluster.StartNode(i); err != nil {
+			t.Fatalf("restart node %d: %v", i, err)
+		}
+	}
+	if err := cluster.PeerMesh(); err != nil {
+		t.Fatalf("remesh: %v", err)
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1},
+		"SELECT title,note,region FROM records",
+		[][]string{{"branched-record", "note-from-left", "region-from-right"}}); err != nil {
+		t.Fatalf("converge merged schema: %v", err)
+	}
+	failed = false
 }
 
 func TestSQLCRDTOperationsConvergeAcrossOfflinePartition(t *testing.T) {
@@ -426,10 +524,161 @@ func TestSQLCRDTOperationsConvergeAcrossOfflinePartition(t *testing.T) {
 
 func TestSQLEmptyPeerRecoversTypedRowsFromARetentionSnapshot(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	// Not wired: the reference prunes source logs with MURMUR RETENTION
-	// COLLECT and requires the empty peer to catch up through a
-	// retained snapshot without advancing its applied-log counter.
-	// On-demand collect (Node.RetentionCollect) and stale-rejoin
-	// snapshot delivery both exist now; the leg needs writing.
-	t.Skip("harness: retention-snapshot recovery leg not wired")
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "typed-records-snapshot",
+		NumNodes: 2,
+		NoMesh:   true,
+	})
+	if err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+
+	schema(t, cluster)
+	// Aggressive retention floor on the source (the reference
+	// minimum_retained: 1); the empty peer never connects, so no
+	// ack record pins its history.
+	if _, err := cluster.Node(0).Simple(
+		"INSERT INTO murmur_config(name,value) VALUES('retention_min_kept','1') ON CONFLICT(name) DO UPDATE SET value=excluded.value"); err != nil {
+		t.Fatalf("node 0 retention floor: %v", err)
+	}
+	if err := cluster.Node(1).Flush(); err != nil {
+		t.Fatalf("node 1 pre-stop flush: %v", err)
+	}
+	if err := cluster.StopNode(1); err != nil {
+		t.Fatalf("stop node 1: %v", err)
+	}
+	var expected [][]string
+	for id := int64(0); id < 12; id++ {
+		title := fmt.Sprintf("snapshot-row-%02d", id)
+		if _, err := cluster.Node(0).Execute(
+			"INSERT INTO records(id,title,score) VALUES($1,$2,$3)",
+			id, title, float64(id)/2.0); err != nil {
+			t.Fatalf("insert %d: %v", id, err)
+		}
+		if err := cluster.Node(0).Flush(); err != nil {
+			t.Fatalf("flush %d: %v", id, err)
+		}
+		expected = append(expected, []string{strconv.FormatInt(id, 10), title})
+	}
+	// RetentionCollect reports moved floors and pruned tombstones
+	// separately; pure inserts move floors with no tombstones, so
+	// the prune proof is moved floors plus an advanced durable
+	// GC watermark (what forces the empty peer onto snapshots).
+	moved, _, err := cluster.Node(0).RetentionCollect()
+	if err != nil {
+		t.Fatalf("retention collect: %v", err)
+	}
+	if moved == 0 {
+		t.Fatal("retention did not move source floors")
+	}
+	mark, err := cluster.Node(0).Simple(
+		"SELECT value FROM murmur_config WHERE name='gc_watermark'")
+	if err != nil || len(mark) != 1 || len(mark[0]) != 1 || mark[0][0] == "0" {
+		t.Fatalf("gc watermark did not advance: %v, %v", mark, err)
+	}
+	// The receiver restarts still peerless (NoMesh, no seeds) and
+	// joins the donor only now, past the prune watermark.
+	if err := cluster.StartNode(1); err != nil {
+		t.Fatalf("restart node 1: %v", err)
+	}
+	before, err := statusNum(cluster, 1, "applied_batches")
+	if err != nil {
+		t.Fatalf("node 1 pre-join applied: %v", err)
+	}
+	if err := cluster.Node(1).PeerAdd(cluster.Node(0).Addr); err != nil {
+		t.Fatalf("node 1 join donor: %v", err)
+	}
+	if err := cluster.Node(0).PeerAdd(cluster.Node(1).Addr); err != nil {
+		t.Fatalf("donor join node 1: %v", err)
+	}
+	if err := goharness.AssertRows(cluster, []int{1},
+		"SELECT id,title FROM records ORDER BY id", expected); err != nil {
+		t.Fatalf("node 1 snapshot rows: %v", err)
+	}
+	after, err := statusNum(cluster, 1, "applied_batches")
+	if err != nil {
+		t.Fatalf("node 1 post-join applied: %v", err)
+	}
+	// The reference requires the applied-log counter to stay flat
+	// (its snapshots bypass the counter). On this stack a snapshot
+	// completion counts as one applied batch on both the Go and
+	// native engines, and the min_kept floor keeps one tail entry
+	// that may arrive as a second log batch after the snapshot. The
+	// portable proof is therefore twofold: the receiver completed a
+	// snapshot, and it applied at most the snapshot plus that one
+	// tail batch (the pruned history cannot replay).
+	snap, err := statusStr(cluster, 1, "snapshot")
+	if err != nil {
+		t.Fatalf("node 1 snapshot status: %v", err)
+	}
+	if len(snap) < 3 || snap[:3] != "ok " {
+		t.Fatalf("receiver completed no snapshot (status %q)", snap)
+	}
+	if after-before < 1 || after-before > 2 {
+		t.Fatalf("receiver applied %d batches, want the snapshot plus at most 1 tail batch (%d -> %d)",
+			after-before, before, after)
+	}
+	// No id_murmur_primary_key column exists here: key stability is
+	// proven by full ordered-row comparison instead.
+	keys, err := cluster.Node(0).Simple("SELECT id,title FROM records ORDER BY id")
+	if err != nil {
+		t.Fatalf("node 0 read keys: %v", err)
+	}
+	got, err := cluster.Node(1).Simple("SELECT id,title FROM records ORDER BY id")
+	if err != nil {
+		t.Fatalf("node 1 read keys: %v", err)
+	}
+	if !reflect.DeepEqual(got, keys) {
+		t.Fatalf("node 1 keys = %v, want %v", got, keys)
+	}
+	if err := cluster.Node(1).Flush(); err != nil {
+		t.Fatalf("node 1 pre-restart flush: %v", err)
+	}
+	if err := cluster.StopNode(1); err != nil {
+		t.Fatalf("stop node 1: %v", err)
+	}
+	if err := cluster.StartNode(1); err != nil {
+		t.Fatalf("restart node 1: %v", err)
+	}
+	if err := goharness.AssertRows(cluster, []int{1},
+		"SELECT id,title FROM records ORDER BY id", expected); err != nil {
+		t.Fatalf("node 1 post-restart rows: %v", err)
+	}
+	failed = false
+}
+
+// statusStr reads one string status snapshot field.
+func statusStr(cluster *goharness.Cluster, idx int, key string) (string, error) {
+	st, err := cluster.Node(idx).ShowStatus()
+	if err != nil {
+		return "", err
+	}
+	m, ok := st.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("node%d status is not an object", idx+1)
+	}
+	v, ok := m[key].(string)
+	if !ok {
+		return "", fmt.Errorf("node%d status has no string %s", idx+1, key)
+	}
+	return v, nil
+}
+
+// statusNum reads one numeric status snapshot field.
+func statusNum(cluster *goharness.Cluster, idx int, key string) (uint64, error) {
+	st, err := cluster.Node(idx).ShowStatus()
+	if err != nil {
+		return 0, err
+	}
+	m, ok := st.(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("node%d status is not an object", idx+1)
+	}
+	v, ok := m[key].(float64)
+	if !ok {
+		return 0, fmt.Errorf("node%d status has no numeric %s", idx+1, key)
+	}
+	return uint64(v), nil
 }

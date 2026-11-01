@@ -5,7 +5,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
+#include "../codec/os_random.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -39,36 +39,7 @@ void wipe_mem(void *p, size_t n) {
 }
 
 bool rand_fill(uint8_t *p, size_t n) {
-  /* getrandom first; fall back to /dev/urandom if the syscall is
-   * missing (old kernels). Short reads retry. */
-  size_t done = 0;
-  while (done < n) {
-    ssize_t r = getrandom(p + done, n - done, 0);
-    if (r < 0) {
-      break;
-    }
-    if (r == 0) {
-      return false;
-    }
-    done += (size_t)r;
-  }
-  if (done == n) {
-    return true;
-  }
-  FILE *f = fopen("/dev/urandom", "rb");
-  if (!f) {
-    return false;
-  }
-  while (done < n) {
-    size_t r = fread(p + done, 1, n - done, f);
-    if (r == 0) {
-      fclose(f);
-      return false;
-    }
-    done += r;
-  }
-  fclose(f);
-  return true;
+  return murmur_os_random(p, n) != 0;
 }
 
 uint16_t load16le(const uint8_t *p) {

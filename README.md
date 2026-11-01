@@ -59,11 +59,16 @@ make -j$(nproc)   # → libmurmur.a
 
 # Native selftests: one gate per subsystem.
 make selftest     # MEMBER/FRAMING/MSGCODEC/PC/SYNC/AES/DRIVER/
-                  # FILES/FETCH/VEC/SEARCH-OK
+                  # FILES/FETCH/TRANSPORT/REPLICATE/VEC/SEARCH-OK
 
 # C proofs: two-node replication and the admin CLI, no Go involved.
 make democheck    # DEMO-OK
 make admincheck   # ADMINCHECK-OK (11 groups, 9 subcommands)
+
+# SQLite's shell with encrypted/compressed Murmur storage.
+make sqlite3-murmur-tool
+./build/sqlite3-murmur-tool/sqlite3-murmur ./my-store
+make sqlite3-murmur-tool-check
 
 # Go client + reference implementation.
 cd clients/go
@@ -74,6 +79,10 @@ go test ./... -count=1
 cd ../..
 sh clients/go/tools/format_xcheck.sh   # XCHECK-OK (14 checks)
 ```
+
+The [sqlite3-murmur CLI](sqlite3-murmur-tool/README.md) prompts for a
+passphrase and uses RocksDB directories for databases and backups. It
+reuses the vendored SQLite shell and links the same `libmurmur.a`.
 
 All benchmarks run with replication on so cr-sqlite is in the
 loop, with AEGIS-256, zstd level 3, 100 ms flush, and an 80/20

@@ -28,6 +28,9 @@ type ClusterOptions struct {
 	// Files stages the file-object store on every node (one uniform
 	// fetch port, distinct 127.0.0.x bind IPs).
 	Files bool
+	// SchemaMaster, when non-nil, is the index of the node that
+	// acts as schema master (nil disables master pushes).
+	SchemaMaster *int
 }
 
 // Cluster is a live multi-node deployment under runtime/<name>/.
@@ -124,6 +127,7 @@ func NewCluster(opts ClusterOptions) (*Cluster, error) {
 			Dir: nodeDir, ID: ids[i], Group: c.Group,
 			Addr: addrs[i], TLS: tls, Key: c.Key,
 			Seeds: seeds, Trust: ids, Child: child, Files: fcfg,
+			SchemaMaster: opts.SchemaMaster != nil && *opts.SchemaMaster == i,
 		})
 		if err != nil {
 			c.closeAll()

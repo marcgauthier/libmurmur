@@ -1404,6 +1404,9 @@ static void *sync_thread(void *v) {
       murmur_sync_status_t st = murmur_serve_pull_once(
           d->eng, &a->peer, &io, &more, &detail, NULL);
       io_close(&io);
+      pthread_mutex_lock(&d->eng->mu);
+      d->eng->anti_entropy++;
+      pthread_mutex_unlock(&d->eng->mu);
       SYNC_DBG("peer=%s gen=%llu pull_once st=%d more=%d detail=%s",
                peer8, (unsigned long long)a->gen, (int)st, more,
                detail ? detail : "-");

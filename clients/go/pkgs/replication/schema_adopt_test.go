@@ -36,15 +36,38 @@ func TestPullerCompatibleCases(t *testing.T) {
 	if err != nil || ok {
 		t.Fatal("puller-missing accepted")
 	}
+	// Puller-extra columns are harmless (donor changes address
+	// columns by name) and required for branch merge.
 	drifted := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY, v TEXT, w TEXT)"})
 	ok, err = PullerCompatible(donor, drifted)
-	if err != nil || ok {
-		t.Fatal("drift accepted")
+	if err != nil || !ok {
+		t.Fatal("puller-extra column rejected")
 	}
+	// Same shape in a different column order still vets: merged
+	// branches append the adopted column last on each side.
+	reordered := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(v TEXT, id INTEGER PRIMARY KEY)"})
+	ok, err = PullerCompatible(donor, reordered)
+	if err != nil || !ok {
+		t.Fatal("reordered shape rejected")
+	}
+	// Same shape modulo formatting vets: only the digest fast-path
+	// distinguishes bytes.
 	pretty := schemaPairs(t, [2]string{"docs", "create table docs( id integer primary key,v text )"})
 	ok, err = PullerCompatible(donor, pretty)
+	if err != nil || !ok {
+		t.Fatal("formatting drift rejected")
+	}
+	// Puller-missing columns and redefined columns still fail: the
+	// donor's changes would be un-ingestable.
+	subset := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY)"})
+	ok, err = PullerCompatible(donor, subset)
 	if err != nil || ok {
-		t.Fatal("formatting drift accepted")
+		t.Fatal("puller-missing column accepted")
+	}
+	redef := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY, v INTEGER)"})
+	ok, err = PullerCompatible(donor, redef)
+	if err != nil || ok {
+		t.Fatal("redefined column accepted")
 	}
 	if _, err := PullerCompatible(donor, []byte{0x01, 0x02}); err == nil {
 		t.Fatal("garbage accepted")
@@ -80,16 +103,27 @@ func TestSchemaDiffCases(t *testing.T) {
 	if err != nil || d.Additive {
 		t.Fatalf("default diff = %+v,%v", d, err)
 	}
-	// Destructive changes.
+	// Local extras are kept, not conflicts: a subset remote adopts
+	// as a no-op, and divergent branches merge through mutual
+	// adoption.
 	withGone := schemaPairs(t, [2]string{"docs", docsDDL}, [2]string{"gone", "CREATE TABLE gone(id INTEGER)"})
 	d, _ = SchemaDiff(withGone, local)
-	if d.Additive || !strings.Contains(d.Incompatible, "retired") {
+	if !d.Additive || len(d.Delta.NewTables) != 0 || len(d.Delta.AddColumns) != 0 {
 		t.Fatalf("retired = %+v", d)
 	}
 	dropped := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY)"})
 	d, _ = SchemaDiff(local, dropped)
-	if d.Additive || !strings.Contains(d.Incompatible, "dropped") {
+	if !d.Additive || len(d.Delta.NewTables) != 0 || len(d.Delta.AddColumns) != 0 {
 		t.Fatalf("dropped = %+v", d)
+	}
+	leftBranch := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY, v TEXT, note TEXT)"})
+	rightBranch := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY, v TEXT, region TEXT)"})
+	d, err = SchemaDiff(leftBranch, rightBranch)
+	if err != nil || !d.Additive || len(d.Delta.AddColumns) != 1 {
+		t.Fatalf("branch diff = %+v,%v", d, err)
+	}
+	if d.Delta.AddColumns[0][0] != "docs" || !strings.Contains(d.Delta.AddColumns[0][1], "region") {
+		t.Fatalf("branch delta = %+v", d.Delta.AddColumns)
 	}
 	redefined := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id TEXT PRIMARY KEY, v TEXT)"})
 	d, _ = SchemaDiff(local, redefined)
@@ -256,10 +290,12 @@ func TestCheckManifestDecisions(t *testing.T) {
 	if err != nil || d != SchemaStale {
 		t.Fatalf("stale = %v,%v", d, err)
 	}
+	// A subset remote is not destructive: it adopts as a no-op
+	// (local extras are kept) instead of recording without adopt.
 	dropped := schemaPairs(t, [2]string{"docs", "CREATE TABLE docs(id INTEGER PRIMARY KEY)"})
 	d, err = CheckSchemaManifest(be, params, e.node, local, ptrSigned(testSigned(2, dropped)), source)
-	if err != nil || d != SchemaRecord {
-		t.Fatalf("destructive = %v,%v", d, err)
+	if err != nil || d != SchemaAdopt {
+		t.Fatalf("subset = %v,%v", d, err)
 	}
 	gated := *params
 	five := fillNode(5)

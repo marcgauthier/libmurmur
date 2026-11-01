@@ -382,8 +382,10 @@ static void test_probe(void) {
   murmur_mship_add_conn(m, &peer);
   uint64_t w[] = {0, 42};
   fake_words_t f = {w, 2, 0};
-  murmur_mship_probe(m, 1000, fake_word, &f);
+  size_t sent = 0, lost = 0;
+  murmur_mship_probe(m, 1000, fake_word, &f, &sent, &lost);
   CHECK(stub.n_sent == 1, "pings = %zu", stub.n_sent);
+  CHECK(sent == 1 && lost == 0, "probe counts sent=%zu lost=%zu", sent, lost);
   if (stub.n_sent == 1) {
     CHECK(stub.sent[0].tag == MURMUR_PKT_PING, "probe tag=%d",
           (int)stub.sent[0].tag);

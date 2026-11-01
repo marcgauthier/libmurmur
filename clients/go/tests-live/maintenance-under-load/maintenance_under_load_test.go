@@ -8,9 +8,9 @@
 // and a post-maintenance write converges everywhere. Nodes are native
 // replication drivers over VFS stores, in-process. The reference's
 // retention_runs counter maps to the health snapshot's
-// retention.last_collection_millis, which advances on every pass. The
-// retention_pruned half has no native observable (the engine never
-// advances collected_transactions) and is skipped (see
+// retention.last_collection_millis, which advances on every pass,
+// and retention_pruned maps to retention.collected_transactions,
+// which advances cumulatively whenever a pass moves floors (see
 // TestRetentionCollectsUnderSustainedLoad).
 package maintenanceunderload
 
@@ -41,12 +41,192 @@ const writerPace = 60 * time.Millisecond
 
 // TestRetentionCollectsUnderSustainedLoad is the reference's pruning
 // half: every node must report collection past the baseline while
-// writes are active. Not wired: the leg needs writing against the
-// health collected_transactions counter plus Node.RetentionCollect
-// (there is still no cumulative pruned counter, only per-pass pruned).
+// writes are active. The reference's retention_pruned counter maps to
+// the health snapshot's retention.collected_transactions, which the
+// engine advances cumulatively whenever a pass moves floors.
 func TestRetentionCollectsUnderSustainedLoad(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	t.Skip("harness: pruning proof not wired (no cumulative pruned counter)")
+	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
+		Name:     "maintenance-pruned",
+		NumNodes: 3,
+	})
+	if err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	failed := true
+	defer func() { cluster.Finish(failed) }()
+
+	for i := 0; i < 3; i++ {
+		if _, err := cluster.Node(i).Simple(
+			"INSERT INTO murmur_config(name,value) VALUES('retention_min_kept','1')" +
+				" ON CONFLICT(name) DO UPDATE SET value=excluded.value"); err != nil {
+			t.Fatalf("node %d set retention_min_kept: %v", i, err)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := cluster.Node(i).Simple("CREATE TABLE IF NOT EXISTS contention(id TEXT PRIMARY KEY NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', score INTEGER NOT NULL DEFAULT 0)"); err != nil {
+			t.Fatalf("node %d create contention: %v", i, err)
+		}
+		if err := cluster.Node(i).SetTableReplicated("contention", true); err != nil {
+			t.Fatalf("node %d replicate contention: %v", i, err)
+		}
+		if err := cluster.Node(i).Flush(); err != nil {
+			t.Fatalf("node %d flush schema: %v", i, err)
+		}
+	}
+	if err := cluster.PeerMesh(); err != nil {
+		t.Fatalf("mesh: %v", err)
+	}
+	seed := 120
+	if raw := os.Getenv("MURMUR_MAINT_LOAD_SEED"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("MURMUR_MAINT_LOAD_SEED = %q: %v", raw, err)
+		}
+		seed = n
+	}
+	cap_ := 4000
+	if raw := os.Getenv("MURMUR_MAINT_LOAD_MAX_INSERTS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("MURMUR_MAINT_LOAD_MAX_INSERTS = %q: %v", raw, err)
+		}
+		cap_ = n
+	}
+	if cap_ <= 0 {
+		t.Fatalf("cap = %d, want > 0", cap_)
+	}
+	var expected [][]string
+	for n := 0; n < seed; n++ {
+		id := fmt.Sprintf("seed-%08d", n)
+		if _, err := cluster.Node(0).Execute(
+			"INSERT INTO contention(id,name,phone,score) VALUES($1,'seed','unchanged',0)", id); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+		expected = append(expected, []string{id, "seed", "unchanged", "0"})
+	}
+	if err := cluster.Node(0).Flush(); err != nil {
+		t.Fatalf("flush seed rows: %v", err)
+	}
+	if !goharness.WaitUntil(wait, 50*time.Millisecond, func() bool {
+		return rowsMatch(t, cluster, expected)
+	}) {
+		t.Fatal("seed rows did not converge")
+	}
+	before := make([]float64, 3)
+	for i := 0; i < 3; i++ {
+		health, err := cluster.Node(i).ShowHealth()
+		if err != nil {
+			t.Fatalf("node %d health: %v", i, err)
+		}
+		pruned, ok := healthNumber(health, "retention", "collected_transactions")
+		if !ok {
+			t.Fatalf("node %d has no retention.collected_transactions", i)
+		}
+		before[i] = pruned
+	}
+	var stop atomic.Bool
+	type finalRows struct {
+		rows map[string]string
+		err  error
+	}
+	finals := make([]finalRows, 3)
+	var wg sync.WaitGroup
+	for worker := 0; worker < 3; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			client := cluster.Node(worker)
+			rows := map[string]string{}
+			n := 0
+			deadline := time.Now().Add(900 * time.Second)
+			for !stop.Load() && time.Now().Before(deadline) {
+				id := fmt.Sprintf("worker-%d-%08d", worker, n%cap_)
+				name := fmt.Sprintf("revision-%d", n)
+				var err error
+				if n < cap_ {
+					_, err = client.Execute("INSERT INTO contention(id,name,phone,score) VALUES($1,$2,'unchanged',0)", id, name)
+				} else {
+					_, err = client.Execute("UPDATE contention SET name=$1 WHERE id=$2", name, id)
+				}
+				if err != nil {
+					finals[worker].err = err
+					return
+				}
+				rows[id] = name
+				n++
+				if n%10 == 0 {
+					if err := client.Flush(); err != nil {
+						finals[worker].err = err
+						return
+					}
+				}
+				time.Sleep(writerPace)
+			}
+			if err := client.Flush(); err != nil {
+				finals[worker].err = err
+				return
+			}
+			finals[worker].rows = rows
+		}(worker)
+	}
+	timeout := parseDurationEnv("MURMUR_MAINT_LOAD_GC_TIMEOUT", "150s", 150)
+	maintStart := time.Now()
+	pruned := goharness.WaitUntil(timeout, 200*time.Millisecond, func() bool {
+		for i := 0; i < 3; i++ {
+			h, err := cluster.Node(i).ShowHealth()
+			if err != nil {
+				return false
+			}
+			got, ok := healthNumber(h, "retention", "collected_transactions")
+			if !ok || got <= before[i] {
+				return false
+			}
+		}
+		return true
+	})
+	stop.Store(true)
+	wg.Wait()
+	for worker, f := range finals {
+		if f.err != nil {
+			t.Fatalf("worker %d: %v", worker, f.err)
+		}
+		for id, name := range f.rows {
+			expected = append(expected, []string{id, name, "unchanged", "0"})
+		}
+	}
+	if !pruned {
+		t.Fatal("retention did not collect under sustained SQL writes")
+	}
+	sortRows(expected)
+	fmt.Fprintf(os.Stderr, "maintenance: collected past baseline after %v; converging %d rows\n",
+		time.Since(maintStart).Round(time.Second), len(expected))
+	for i := 0; i < 3; i++ {
+		if err := cluster.Node(i).Flush(); err != nil {
+			t.Fatalf("node %d final sync flush: %v", i, err)
+		}
+	}
+	if !goharness.WaitUntil(wait, 100*time.Millisecond, func() bool {
+		return rowsMatch(t, cluster, expected)
+	}) {
+		t.Fatal("worker rows did not converge")
+	}
+	if _, err := cluster.Node(0).Execute(
+		"INSERT INTO contention(id,name,phone,score) VALUES('post-maintenance','ready','unchanged',0)"); err != nil {
+		t.Fatalf("insert post-maintenance: %v", err)
+	}
+	if err := cluster.Node(0).Flush(); err != nil {
+		t.Fatalf("flush post-maintenance: %v", err)
+	}
+	expected = append(expected, []string{"post-maintenance", "ready", "unchanged", "0"})
+	sortRows(expected)
+	if !goharness.WaitUntil(wait, 100*time.Millisecond, func() bool {
+		return rowsMatch(t, cluster, expected)
+	}) {
+		t.Fatal("post-maintenance row did not converge")
+	}
+	failed = false
 }
 
 func TestMaintenanceUnderSustainedLoad(t *testing.T) {

@@ -7,7 +7,7 @@
 #include "murmur_codec.h"
 
 #include <string.h>
-#include <sys/random.h>
+#include "os_random.h"
 #include <unistd.h>
 
 #include <fcntl.h>
@@ -34,7 +34,12 @@ const int kErrMisuse = -5;
 
 void wipe(void *p, size_t n) {
   // explicit_bzero: vectorized like memset but never elided.
+#ifdef _WIN32
+  volatile uint8_t *v = (volatile uint8_t *)p;
+  while (n--) *v++ = 0;
+#else
   explicit_bzero(p, n);
+#endif
 }
 
 struct KeyEntry {
@@ -54,36 +59,12 @@ struct CodecImpl {
   uint8_t master[32];
   ZSTD_CCtx *cctx = nullptr;
   ZSTD_DCtx *dctx = nullptr;
-  int urandom_fd = -1;  // lazy getrandom(2) fallback
   bool aegis_ready = false;
 };
 
 bool rand_bytes(CodecImpl *c, uint8_t *p, size_t n) {
-  size_t done = 0;
-  while (done < n) {
-    ssize_t r = getrandom(p + done, n - done, 0);
-    if (r <= 0) {
-      break;
-    }
-    done += (size_t)r;
-  }
-  if (done == n) {
-    return true;
-  }
-  if (c->urandom_fd < 0) {
-    c->urandom_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (c->urandom_fd < 0) {
-      return false;
-    }
-  }
-  while (done < n) {
-    ssize_t r = read(c->urandom_fd, p + done, n - done);
-    if (r <= 0) {
-      return false;
-    }
-    done += (size_t)r;
-  }
-  return true;
+  (void)c;
+  return murmur_os_random(p, n) != 0;
 }
 
 bool ensure_aegis(CodecImpl *c) {
@@ -594,9 +575,6 @@ void murmur_codec_destroy(MurmurCodec *raw) {
   }
   if (c->dctx) {
     ZSTD_freeDCtx(c->dctx);
-  }
-  if (c->urandom_fd >= 0) {
-    close(c->urandom_fd);
   }
   wipe(c->page, 32);
   wipe(c->active, 32);

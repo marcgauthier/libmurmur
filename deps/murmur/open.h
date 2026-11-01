@@ -164,6 +164,8 @@ int nvStoreKdf(uint64_t handle, int *sealed, uint8_t *kdf,
 // batch count.
 int nvStoreSyncStats(uint64_t handle, uint64_t *committed_size,
                      uint64_t *flush_batches);
+/* Durability barrier for a live shell reference. Caller retains handle. */
+int nvStoreFlush(uint64_t handle);
 
 // nvCommitDb snapshots the commit boundary for a journal path:
 // names not ending in -journal, or with no live owner, answer OK.

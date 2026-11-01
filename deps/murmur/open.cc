@@ -21,11 +21,19 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <ftw.h>
+#else
+#include <filesystem>
+#include <direct.h>
+#include <io.h>
+#define fsync _commit
+#define lstat stat
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
+#include "../codec/os_random.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -263,6 +271,13 @@ uint32_t defaultBgThreads() {
 
 // mkdirAll replicates os.MkdirAll(dir, 0700).
 bool mkdirAll(const std::string &dir) {
+#ifdef _WIN32
+  if (dir.empty()) return false;
+  std::error_code ec;
+  auto path = std::filesystem::u8path(dir);
+  std::filesystem::create_directories(path, ec);
+  return !ec && std::filesystem::is_directory(path, ec);
+#else
   if (dir.empty()) {
     return false;
   }
@@ -289,6 +304,7 @@ bool mkdirAll(const std::string &dir) {
   }
   struct stat st;
   return stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
 }
 
 bool isDir(const char *path) {
@@ -399,26 +415,7 @@ int canonHexVal(char c);
 
 // cryptoRand fills n bytes from the OS CSPRNG.
 bool cryptoRand(uint8_t *out, size_t n) {
-#if defined(__linux__) || defined(__APPLE__)
-  size_t done = 0;
-  while (done < n) {
-    size_t chunk = n - done > 256 ? 256 : n - done;
-    if (getentropy(out + done, chunk) != 0) {
-      break;
-    }
-    done += chunk;
-  }
-  if (done == n) {
-    return true;
-  }
-#endif
-  FILE *f = fopen("/dev/urandom", "rb");
-  if (!f) {
-    return false;
-  }
-  size_t got = fread(out, 1, n, f);
-  fclose(f);
-  return got == n;
+  return murmur_os_random(out, n) != 0;
 }
 
 // parseHex32 decodes exactly 64 hex chars into 32 bytes.
@@ -1101,6 +1098,13 @@ void hexLower16(const uint8_t id[16], char out[33]) {
   out[32] = '\0';
 }
 
+#ifdef _WIN32
+void removeTree(const char *path) {
+  std::error_code ec;
+  std::filesystem::remove_all(std::filesystem::u8path(path), ec);
+}
+void fsyncDirBestEffort(const char *) {}
+#else
 int removeTreeCb(const char *path, const struct stat *, int,
                  struct FTW *) {
   return remove(path);
@@ -1119,6 +1123,8 @@ void fsyncDirBestEffort(const char *path) {
     close(fd);
   }
 }
+
+#endif
 
 // writeBackupManifest mirrors Go WriteBackupManifest byte-exactly:
 // flat object, no spaces, trailing newline, O_EXCL 0600, synced.
@@ -1445,6 +1451,18 @@ int canonHexVal(char c) {
 // spellings. Moved here from vfs.cc: the registry is the single
 // owner now. TestCanonDifferential pins parity with the Go form.
 std::string murmurCanonName(const char *name) {
+#ifdef _WIN32
+  std::string path = name ? name : "";
+  // SQLite has already decoded URI names before passing them to the VFS.
+  if (path.compare(0, 5, "file:") == 0) path.erase(0, 5);
+  std::error_code ec;
+  auto full = std::filesystem::absolute(std::filesystem::u8path(path), ec);
+  if (ec) return path;
+  std::string result = full.lexically_normal().generic_u8string();
+  // Windows paths are case insensitive; use one registry identity.
+  for (char &c : result) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+  return result;
+#else
   if (name && name[0] == '/') {
     size_t n = strlen(name);
     if (n < 1024) {
@@ -1517,6 +1535,7 @@ std::string murmurCanonName(const char *name) {
   }
   abs.resize(m);
   return abs;
+#endif
 }
 
 namespace {
@@ -2197,6 +2216,23 @@ int nvStoreSyncStats(uint64_t handle, uint64_t *committed_size,
   std::lock_guard<std::mutex> l(st->mu);
   *committed_size = st->committedSize;
   *flush_batches = st->flushBatches;
+  return SQLITE_OK;
+}
+
+int nvStoreFlush(uint64_t handle) {
+  OpenStore *st=nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_mu);
+    auto it=g_entries.find(handle);
+    if(it==g_entries.end() || it->second.isFile) return SQLITE_NOTFOUND;
+    st=it->second.store;
+  }
+  NvDb *db=st->db.load();
+  if(!db) return SQLITE_AUTH;
+  if(nv_db_flush(db)!=0) return SQLITE_IOERR;
+  char error[512]; int rc=nv_store_sync(st->store,error,sizeof(error));
+  if(rc<0) return SQLITE_IOERR;
+  if(rc>0) { std::lock_guard<std::mutex> lock(st->mu); ++st->flushBatches; }
   return SQLITE_OK;
 }
 

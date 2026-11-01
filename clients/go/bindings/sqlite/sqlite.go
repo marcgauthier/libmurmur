@@ -27,6 +27,7 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"time"
 	"unsafe"
 )
 
@@ -195,6 +196,11 @@ func (c *Conn) Autocommit() bool {
 	return C.sqlite3_get_autocommit(c.db) != 0
 }
 
+// LastInsertRowID reports the rowid of the last successful insert.
+func (c *Conn) LastInsertRowID() int64 {
+	return int64(C.sqlite3_last_insert_rowid(c.db))
+}
+
 // Stmt is a prepared statement. It is not safe for concurrent use.
 type Stmt struct {
 	db      *C.sqlite3
@@ -302,6 +308,17 @@ func (s *Stmt) ColumnCount() int {
 	return int(C.sqlite3_column_count(s.s))
 }
 
+// ColumnName reports the name of result column i.
+func (s *Stmt) ColumnName(i int) string {
+	s.lock()
+	defer s.unlock()
+	p := C.sqlite3_column_name(s.s, C.int(i))
+	if p == nil {
+		return ""
+	}
+	return C.GoString(p)
+}
+
 // ColumnType reports the storage type of column i in the current row.
 func (s *Stmt) ColumnType(i int) int {
 	s.lock()
@@ -335,15 +352,20 @@ func (s *Stmt) ColumnText(i int) string {
 	return C.GoStringN((*C.char)(unsafe.Pointer(p)), n)
 }
 
-// ColumnBlob reads column i as a blob. The bytes are copied.
+// ColumnBlob reads column i as a blob. The bytes are copied. NULL
+// reads back nil; an empty blob reads back non-nil. (A zero-length
+// blob and NULL both present a nil pointer, so the type decides.)
 func (s *Stmt) ColumnBlob(i int) []byte {
 	s.lock()
 	defer s.unlock()
-	n := C.sqlite3_column_bytes(s.s, C.int(i))
-	p := C.sqlite3_column_blob(s.s, C.int(i))
-	if p == nil || n == 0 {
+	if C.sqlite3_column_type(s.s, C.int(i)) == C.SQLITE_NULL {
 		return nil
 	}
+	n := C.sqlite3_column_bytes(s.s, C.int(i))
+	if n == 0 {
+		return []byte{}
+	}
+	p := C.sqlite3_column_blob(s.s, C.int(i))
 	return C.GoBytes(p, n)
 }
 
@@ -404,4 +426,76 @@ func (s *Stmt) BindNull(i int) error {
 	s.lock()
 	defer s.unlock()
 	return s.bindErr(C.sqlite3_bind_null(s.s, C.int(i)))
+}
+
+// BindZeroBlob binds parameter i (1-based) to a zero-filled blob of
+// n bytes. n == 0 binds an empty (non-NULL) blob.
+func (s *Stmt) BindZeroBlob(i, n int) error {
+	s.lock()
+	defer s.unlock()
+	return s.bindErr(C.sqlite3_bind_zeroblob(s.s, C.int(i), C.int(n)))
+}
+
+// Bind binds args to parameters 1..N. Conversions mirror the
+// reference client: nil is NULL, bools and all int/uint widths are
+// integers, floats are reals, strings are text, and []byte is a
+// blob (nil binds NULL, empty binds an empty blob). time.Time
+// binds UTC RFC3339Nano text. Anything else is an error.
+func (s *Stmt) Bind(args ...any) error {
+	for n, a := range args {
+		if err := s.bindOne(n+1, a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Stmt) bindOne(i int, a any) error {
+	switch v := a.(type) {
+	case nil:
+		return s.BindNull(i)
+	case bool:
+		if v {
+			return s.BindInt64(i, 1)
+		}
+		return s.BindInt64(i, 0)
+	case int:
+		return s.BindInt64(i, int64(v))
+	case int8:
+		return s.BindInt64(i, int64(v))
+	case int16:
+		return s.BindInt64(i, int64(v))
+	case int32:
+		return s.BindInt64(i, int64(v))
+	case int64:
+		return s.BindInt64(i, v)
+	case uint:
+		return s.BindInt64(i, int64(v))
+	case uint8:
+		return s.BindInt64(i, int64(v))
+	case uint16:
+		return s.BindInt64(i, int64(v))
+	case uint32:
+		return s.BindInt64(i, int64(v))
+	case uint64:
+		return s.BindInt64(i, int64(v))
+	case float32:
+		return s.BindFloat(i, float64(v))
+	case float64:
+		return s.BindFloat(i, v)
+	case string:
+		return s.BindText(i, v)
+	case []byte:
+		if v == nil {
+			return s.BindNull(i)
+		}
+		if len(v) == 0 {
+			return s.BindZeroBlob(i, 0)
+		}
+		return s.BindBlob(i, v)
+	case time.Time:
+		return s.BindText(i, v.UTC().Format(time.RFC3339Nano))
+	default:
+		return fmt.Errorf("sqlite: cannot bind %T", a)
+	}
 }

@@ -5,6 +5,7 @@
 // the commit barrier.
 #include <stdint.h>
 #include <string.h>
+#include <mutex>
 
 #include "rocksdb/advanced_cache.h"
 #include "rocksdb/cache.h"
@@ -20,6 +21,9 @@
 namespace {
 
 struct NvStore {
+  /* Serialize async writes with the WAL barrier. Otherwise a concurrent
+   * barrier can clear dirty after a newer async write has set it. */
+  std::mutex write_mu;
   rocksdb::DB *db;
   std::shared_ptr<rocksdb::Cache> cache;
   std::shared_ptr<rocksdb::Statistics> stats;
@@ -114,6 +118,7 @@ int nv_store_put(NvStore *s, const uint8_t *key, size_t klen,
   if (!s || !s->db) {
     return -1;
   }
+  std::lock_guard<std::mutex> lock(s->write_mu);
   rocksdb::Status st =
       s->db->Put(sync ? s->wo_sync : s->wo,
                  rocksdb::Slice((const char *)key, klen),
@@ -133,6 +138,7 @@ int nv_store_del(NvStore *s, const uint8_t *key, size_t klen, int sync,
   if (!s || !s->db) {
     return -1;
   }
+  std::lock_guard<std::mutex> lock(s->write_mu);
   rocksdb::Status st =
       s->db->Delete(sync ? s->wo_sync : s->wo,
                     rocksdb::Slice((const char *)key, klen));
@@ -154,6 +160,7 @@ int nv_store_write_batch(NvStore *s, size_t count, const uint8_t **keys,
   if (!s || !s->db) {
     return -1;
   }
+  std::lock_guard<std::mutex> lock(s->write_mu);
   rocksdb::WriteBatch b;
   for (size_t i = 0; i < count; i++) {
     if (!keys[i] || !vals[i]) {
@@ -183,6 +190,7 @@ int nv_store_del_pages_from(NvStore *s, uint64_t first, char *err,
   if (!s || !s->db) {
     return -1;
   }
+  std::lock_guard<std::mutex> lock(s->write_mu);
   uint8_t start[9];
   start[0] = 'p';
   for (int i = 0; i < 8; i++) {
@@ -211,6 +219,7 @@ int nv_store_sync(NvStore *s, char *err, size_t err_cap) {
   if (!s || !s->db) {
     return -1;
   }
+  std::lock_guard<std::mutex> lock(s->write_mu);
   if (!s->dirty) {
     return 0;
   }

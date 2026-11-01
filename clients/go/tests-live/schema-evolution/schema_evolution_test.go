@@ -1,14 +1,16 @@
 // Live scenario: additive SQL schema changes replicate to an offline
 // peer; local destructive DDL stays permitted.
 //
-// Port of MURMUR-SQL schema-evolution. The additive-migration leg is
-// skipped: a bare ALTER TABLE ADD COLUMN on a replicated (CRR) table
-// leaves stale triggers behind, so the very next write fails
-// ("expected 7 values, got 5") and migration cannot proceed. The
-// replicated-DDL guard legs (DROP/RENAME rejected on replicated
-// tables, MURMUR SHOW TABLES REPLICATION) are skipped too. What runs
-// is the local-DDL leg: destructive DDL on a local table succeeds on
-// node 0 without disturbing replicated rows anywhere.
+// Port of MURMUR-SQL schema-evolution. The additive migration uses
+// the cr-sqlite begin/commit-alter protocol on the altering node (a
+// bare ALTER TABLE ADD COLUMN on a CRR leaves stale triggers behind,
+// so the very next write fails with "expected 7 values, got 5").
+// Adopting nodes must rebuild their own triggers when they apply the
+// adopted column. The replicated-DDL guard legs (DROP/RENAME rejected
+// on replicated tables, MURMUR SHOW TABLES REPLICATION) are skipped:
+// the native SQL surface has no replicated-DDL guard. The local-DDL
+// leg runs: destructive DDL on a local table succeeds on node 0
+// without disturbing replicated rows anywhere.
 package schemaevolution
 
 import (
@@ -19,11 +21,6 @@ import (
 
 func TestAdditiveSQLSchemaMigrationPreservesRows(t *testing.T) {
 	goharness.SkipUnlessLive(t)
-	// Blocked: ALTER TABLE ADD COLUMN on a CRR breaks subsequent
-	// writes (stale triggers: "expected 7 values, got 5"); the
-	// bundled cr-sqlite exposes no begin/commit-alter protocol to
-	// rebuild them.
-	t.Skip("harness: ALTER TABLE on replicated tables breaks CRR writes")
 	cluster, err := goharness.NewCluster(goharness.ClusterOptions{
 		Name:     "schema-evolution",
 		NumNodes: 3,
@@ -60,8 +57,16 @@ func TestAdditiveSQLSchemaMigrationPreservesRows(t *testing.T) {
 	if err := cluster.StopNode(2); err != nil {
 		t.Fatalf("stop node 2: %v", err)
 	}
-	if _, err := cluster.Node(0).Simple("ALTER TABLE records ADD COLUMN note TEXT"); err != nil {
-		t.Fatalf("add column: %v", err)
+	// The altering node wraps the migration in the cr-sqlite
+	// begin/commit-alter protocol so its own triggers are rebuilt.
+	for _, sql := range []string{
+		"SELECT crsql_begin_alter('records')",
+		"ALTER TABLE records ADD COLUMN note TEXT",
+		"SELECT crsql_commit_alter('records')",
+	} {
+		if _, err := cluster.Node(0).Simple(sql); err != nil {
+			t.Fatalf("migrate %q: %v", sql, err)
+		}
 	}
 	if _, err := cluster.Node(0).Simple("UPDATE records SET note='new-field' WHERE name='seed'"); err != nil {
 		t.Fatalf("update after DDL: %v", err)
@@ -76,6 +81,28 @@ func TestAdditiveSQLSchemaMigrationPreservesRows(t *testing.T) {
 		{"new", "2", "written-after-ddl"},
 		{"seed", "1", "new-field"},
 	}
+	// The online peer adopts the column through schema replication.
+	if err := goharness.AssertRows(cluster, []int{0, 1},
+		"SELECT name,score,note FROM records ORDER BY name", expected); err != nil {
+		t.Fatalf("converge migrated rows on adopter: %v", err)
+	}
+	// The adopter must be writable after adoption: its CRR triggers
+	// must have been rebuilt for the new column.
+	if _, err := cluster.Node(1).Simple("INSERT INTO records(name,score,note) VALUES('adopter-write',3,'from-node-1')"); err != nil {
+		t.Fatalf("adopter write after DDL: %v", err)
+	}
+	if err := cluster.Node(1).Flush(); err != nil {
+		t.Fatalf("flush adopter write: %v", err)
+	}
+	expected = [][]string{
+		{"adopter-write", "3", "from-node-1"},
+		{"new", "2", "written-after-ddl"},
+		{"seed", "1", "new-field"},
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1},
+		"SELECT name,score,note FROM records ORDER BY name", expected); err != nil {
+		t.Fatalf("converge adopter write: %v", err)
+	}
 	// The offline peer must learn the new schema and values on reconnect.
 	if err := cluster.StartNode(2); err != nil {
 		t.Fatalf("restart node 2: %v", err)
@@ -83,6 +110,23 @@ func TestAdditiveSQLSchemaMigrationPreservesRows(t *testing.T) {
 	if err := goharness.AssertRows(cluster, []int{0, 1, 2},
 		"SELECT name,score,note FROM records ORDER BY name", expected); err != nil {
 		t.Fatalf("converge migrated rows: %v", err)
+	}
+	// The rejoining peer must be writable too.
+	if _, err := cluster.Node(2).Simple("INSERT INTO records(name,score,note) VALUES('rejoin-write',4,'from-node-2')"); err != nil {
+		t.Fatalf("rejoin write after DDL: %v", err)
+	}
+	if err := cluster.Node(2).Flush(); err != nil {
+		t.Fatalf("flush rejoin write: %v", err)
+	}
+	expected = [][]string{
+		{"adopter-write", "3", "from-node-1"},
+		{"new", "2", "written-after-ddl"},
+		{"rejoin-write", "4", "from-node-2"},
+		{"seed", "1", "new-field"},
+	}
+	if err := goharness.AssertRows(cluster, []int{0, 1, 2},
+		"SELECT name,score,note FROM records ORDER BY name", expected); err != nil {
+		t.Fatalf("converge rejoin write: %v", err)
 	}
 	for _, sql := range []string{
 		"CREATE TABLE local_only(id INTEGER PRIMARY KEY NOT NULL, old TEXT NOT NULL DEFAULT '')",

@@ -2211,8 +2211,6 @@ murmur_search_status_t murmur_search_tick(murmur_search_manager_t *m,
         first_err = s;
         first_detail = detail ? strdup(detail) : NULL;
         first_sqlrc = sqlrc1;
-      } else {
-        free(detail);
       }
       s = MURMUR_SEARCH_OK;
     }

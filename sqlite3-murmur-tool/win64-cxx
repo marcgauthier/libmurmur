@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+if command -v x86_64-w64-mingw32-g++-posix >/dev/null 2>&1; then
+  exec x86_64-w64-mingw32-g++-posix "$@"
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+gcc_lib=$(dirname "$(x86_64-w64-mingw32-gcc-posix -print-libgcc-file-name)")
+exec "$root/build/win64/toolchain/root/usr/bin/x86_64-w64-mingw32-g++-posix" \
+  -B"$gcc_lib/" \
+  -B/usr/x86_64-w64-mingw32/lib/ -idirafter /usr/x86_64-w64-mingw32/include "$@"
