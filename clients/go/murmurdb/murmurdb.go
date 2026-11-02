@@ -223,7 +223,11 @@ type conn struct {
 	closed atomic.Bool
 	// mu serializes whole Exec/Query sequences: one native
 	// statement runs at a time per connection.
-	mu sync.Mutex
+	mu                       sync.Mutex
+	work                     chan nativeCall
+	workerDone               chan struct{}
+	capture                  bool
+	inTx, txCapture, txGuard bool
 	// cache reuses prepared statements across calls (C/Rust
 	// prepare once and reset). busy marks a statement checked
 	// out by open rows.
@@ -251,13 +255,25 @@ func (c *conn) Close() error {
 		return nil
 	}
 	c.mu.Lock()
-	for q, e := range c.cache {
-		_ = e.st.Close()
-		delete(c.cache, q)
+	defer c.mu.Unlock()
+	err := c.runNative(func() error {
+		var err error
+		if c.inTx {
+			err = c.endTransaction(true)
+		}
+		for q, e := range c.cache {
+			err = errors.Join(err, e.st.Close())
+			delete(c.cache, q)
+		}
+		c.cacheBytes = 0
+		return errors.Join(err, c.raw.Close())
+	})
+	if c.work != nil {
+		close(c.work)
+		<-c.workerDone
+		c.work = nil
 	}
-	c.cacheBytes = 0
-	c.mu.Unlock()
-	return c.raw.Close()
+	return err
 }
 
 func (c *conn) Ping(ctx context.Context) error {
@@ -267,16 +283,22 @@ func (c *conn) Ping(ctx context.Context) error {
 	if err := c.checkOpen(); err != nil {
 		return err
 	}
-	st, err := c.raw.Prepare("SELECT 1")
-	if err != nil {
-		return driver.ErrBadConn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkOpen(); err != nil {
+		return err
 	}
-	defer st.Close()
-	_, err = st.Step()
-	if err != nil {
-		return driver.ErrBadConn
-	}
-	return nil
+	return c.runNative(func() error {
+		return c.withSQLContext(ctx, func() error {
+			st, err := c.raw.Prepare("SELECT 1")
+			if err != nil {
+				return driver.ErrBadConn
+			}
+			defer st.Close()
+			_, err = st.Step()
+			return err
+		})
+	})
 }
 
 // CheckNamedValue keeps positional (?) arguments only.
@@ -302,7 +324,15 @@ func (c *conn) Begin() (driver.Tx, error) {
 	// connection and may run while a transaction opens or closes.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.raw.Exec("BEGIN"); err != nil {
+	if err := c.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := c.runNative(func() error {
+		if err := c.checkOpen(); err != nil {
+			return err
+		}
+		return c.beginTransaction()
+	}); err != nil {
 		return nil, err
 	}
 	return &tx{c: c}, nil
@@ -403,11 +433,20 @@ func (c *conn) execArgs(ctx context.Context, query string, args []driver.NamedVa
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.checkOpen(); err != nil {
+		return nil, err
+	}
 	var res driver.Result
-	err := c.withContext(ctx, func() error {
-		var err error
-		res, err = c.execLocked(query, args)
-		return err
+	err := c.runNative(func() error {
+		return c.withSQLContext(ctx, func() error {
+			var err error
+			if c.work != nil {
+				res, err = c.execSerialized(ctx, query, args)
+			} else {
+				res, err = c.execLocked(query, args)
+			}
+			return err
+		})
 	})
 	return res, err
 }
@@ -455,6 +494,22 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, err
 	}
 	c.mu.Lock()
+	if err := c.checkOpen(); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	if c.work != nil {
+		defer c.mu.Unlock()
+		var out driver.Rows
+		err := c.runNative(func() error {
+			return c.withSQLContext(ctx, func() error {
+				var err error
+				out, err = c.querySerialized(ctx, query, valuesOf(args))
+				return err
+			})
+		})
+		return out, err
+	}
 	st, cached, err := c.checkout(query)
 	if err != nil {
 		c.mu.Unlock()
@@ -585,10 +640,10 @@ func (t *tx) finish(rb bool) error {
 	}
 	t.c.mu.Lock()
 	defer t.c.mu.Unlock()
-	if rb {
-		return t.c.raw.Exec("ROLLBACK")
+	if err := t.c.checkOpen(); err != nil {
+		return err
 	}
-	return t.c.raw.Exec("COMMIT")
+	return t.c.runNative(func() error { return t.c.endTransaction(rb) })
 }
 
 func (t *tx) Commit() error   { return t.finish(false) }

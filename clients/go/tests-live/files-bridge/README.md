@@ -1,26 +1,24 @@
 # files-bridge
 
-The reference meshes a two-node Low cluster and a two-node High cluster
-(separate DBIDs, CAs, storage keys, and file object keys: `0x11..` on
-Low, `0x22..` on High) and moves one 384 KiB file
-(`shared/field-map.bin`, stream `field-files`) across a shared staging
-directory: Low upload, Low mesh metadata plus digest-verified peer
-fetch, signed export of sealed file chunks, High import with
-re-encryption under the High object key, High mesh metadata plus
-digest-verified peer fetch, and metadata search returning the one
-replicated file.
+Two Low nodes and two High nodes use different database IDs, CAs and object
+keys. A 384 KiB file uploaded to a Low peer is fetched by its exporter, sealed
+in bounded bridge parts, imported and re-encrypted on High, then fetched by the
+second High peer. The second High node does not scan a ferry directory: it
+receives and verifies original source parts through the signed High journal.
+Its source receipts and drained encrypted chunk staging are checked explicitly.
+The test compares content and confirms the encrypted object
+containers differ between domains. Full exporter and receiver reopen proves
+completed files are not recaptured or reapplied.
 
-`TestTwoLowTwoHighFileBridgeLive` is skipped on this stack: the native
-bindings and the harness have no file-bridge surface at all -- no
-bridge exporter/receiver roles, no bundle capture/process, no staging
-directory handling, and no signer/recipient key configuration (the
-harness stages one uniform file-object store per cluster). A
-single-cluster upload/fetch round-trip would not prove the bridge, so
-the suite stays a named skip rather than a weakened pass.
+Native file-bridge tests additionally cover partial-export resume, empty
+files, partial-import cancellation, offset gaps, duplicate/conflicting chunks,
+full-content digest verification, and atomic metadata/receipt rollback.
 
-## Verification
+The harness uses a 100 ms native peer-fetch interval and advertises each file
+service's actual loopback address. A replicated fixture establishes the mesh
+before upload. The runtime performs no plaintext filesystem staging: received
+chunks are retained in encrypted SQL until native object publication commits.
 
 ```sh
-cd clients/go && go vet ./tests-live/files-bridge/ && \
-  MURMUR_ENGINE_INTEGRATION=1 go test -count=1 -timeout 600s ./tests-live/files-bridge/
+MURMUR_ENGINE_INTEGRATION=1 go test -count=1 -timeout 120s ./tests-live/files-bridge/
 ```

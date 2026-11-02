@@ -1,27 +1,18 @@
 # bridge-two-streams
 
-Two low bridge domains (First/Second Low) export through one shared
-staging directory into a single high domain. Both streams converge
-marker rows, keep separate outbox budgets, and the High side's
-per-stream import wins, inbox burn-down, and isolation all hold.
+Two native single-node Low domains export different streams through a shared
+directory into one native High node. Each stream retains its source identity,
+signing and receiver keys, queue budget, progress and private quarantine.
+The test verifies both streams import, High-owned fields remain protected,
+queues drain, and a forgery in the second stream does not stop the first.
 
-## Status: skipped (no bridge machinery in this stack)
-
-Every leg needs bridge domains plus bundle export/import over a
-shared staging directory, none of which the harness or bindings
-expose (same gap as the typed-bridge port). The suite skips with
-`harness: bridge domains (per-stream bridge export/import over a
-shared staging dir)`.
-
-## Reference pass criteria (for when bridge lands)
-
-- Both streams converge marker rows on High.
-- Per-stream outbox budgets stay separate; second stream quarantines
-  correctly.
-- High-side import wins, inbox burn-down, and isolation hold.
+Native artifact-store tests additionally check that one lane's queued bytes
+cannot consume another lane's configured budget. All lanes retain a shared
+1 GiB hard cap per inbox/outbox for overall database resource control.
+Cross-peer forwarding and file chunks are separate release gates.
 
 Run from `clients/go`:
 
 ```sh
-MURMUR_ENGINE_INTEGRATION=1 go test -count=1 -timeout 600s ./tests-live/bridge-two-streams/
+MURMUR_ENGINE_INTEGRATION=1 go test -count=1 -timeout 90s ./tests-live/bridge-two-streams/
 ```

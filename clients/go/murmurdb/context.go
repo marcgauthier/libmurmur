@@ -32,7 +32,20 @@ import (
 	"database/sql/driver"
 	"errors"
 	"unsafe"
+
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 )
+
+// Install the statement-local cancellation handler only while native writer
+// admission excludes replication SQL on this same handle.
+func (c *conn) withSQLContext(ctx context.Context, fn func() error) error {
+	if c.work == nil {
+		return c.withContext(ctx, fn)
+	}
+	sqlite.LockWriter()
+	defer sqlite.UnlockWriter()
+	return c.withContext(ctx, fn)
+}
 
 // withContext runs while c.mu owns the connection. The progress handler
 // reads a C atomic rather than calling Go from SQLite. Joining cancellation
