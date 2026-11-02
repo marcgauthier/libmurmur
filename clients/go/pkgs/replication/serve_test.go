@@ -2,6 +2,7 @@ package replication
 
 import (
 	"bytes"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -252,5 +253,79 @@ func TestStartClaimsIdentity(t *testing.T) {
 	e3 := New(db, stubTransport{})
 	if err := e3.Start(); errKind(err) != "Auth" {
 		t.Fatalf("cloned site err = %v", err)
+	}
+}
+
+func TestHandshakeRefusesExcluded(t *testing.T) {
+	group := mustNode(t, strings.Repeat("aa", 16))
+	donor, donorDB := openEngine(t, group, strings.Repeat("11", 16))
+	receiver, _ := openEngine(t, group, strings.Repeat("22", 16))
+	makeSyncTable(t, donorDB, "t")
+	schema, err := Schema(donorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := MsgHello{Group: group, Node: receiver.node, Site: receiver.site, Schema: schema, Incarnation: 7}
+	shake := func() error {
+		var buf bytes.Buffer
+		if err := WriteFrame(&buf, hello); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := donor.Handshake(io.Discard, &buf, false, receiver.node)
+		return err
+	}
+	if err := shake(); err != nil {
+		t.Fatalf("clean handshake err = %v", err)
+	}
+	if err := persistExcluded(donorDB, receiver.node); err != nil {
+		t.Fatal(err)
+	}
+	if err := shake(); errKind(err) != "Auth" {
+		t.Fatalf("excluded handshake err = %v", err)
+	}
+}
+
+func TestExcludedRoundtrip(t *testing.T) {
+	db := openCRR(t)
+	a := mustNode(t, strings.Repeat("11", 16))
+	b := mustNode(t, strings.Repeat("22", 16))
+	c := mustNode(t, strings.Repeat("33", 16))
+	if err := persistExcluded(db, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistExcluded(db, b); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadExcluded(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || (got[0] != a && got[1] != a) || (got[0] != b && got[1] != b) {
+		t.Fatalf("loadExcluded = %v", got)
+	}
+	if ok, err := isExcluded(db, a); err != nil || !ok {
+		t.Fatalf("isExcluded(a) = %v, %v", ok, err)
+	}
+	if ok, err := isExcluded(db, c); err != nil || ok {
+		t.Fatalf("isExcluded(c) = %v, %v", ok, err)
+	}
+}
+
+func TestStartReloadsExcluded(t *testing.T) {
+	db := openCRR(t)
+	if err := SetSetting(db, "group_id", strings.Repeat("aa", 16)); err != nil {
+		t.Fatal(err)
+	}
+	id := mustNode(t, strings.Repeat("11", 16))
+	if err := persistExcluded(db, id); err != nil {
+		t.Fatal(err)
+	}
+	e := New(db, stubTransport{})
+	if err := e.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	if !e.view.Excluded[id] {
+		t.Fatal("Start did not reload the durable exclusion set")
 	}
 }

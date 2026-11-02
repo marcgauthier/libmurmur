@@ -39,6 +39,9 @@ static const def_ent_t kDefaults[] = {
     {"certificate", ""},
     {"private_key", ""},
     {"ca", ""},
+    {"crl_file", ""},
+    {"origin_key_file", ""},
+    {"trusted_origins", ""},
     {"crsqlite_extension", ""},
     {"bind", "0.0.0.0:7443"},
     {"bootstrap", "[]"},
@@ -592,6 +595,33 @@ static int policy_row(const uint8_t *key, size_t key_len, const uint8_t *type,
   return -1;
 }
 
+/* trusted_origins rows: 32-hex site keys, 64-hex ed25519 pubkeys. */
+static int origin_row(const uint8_t *key, size_t key_len, const uint8_t *type,
+                      const uint8_t *val, size_t val_len, void *ctx) {
+  (void)ctx;
+  if (strcmp((const char *)type, "text") != 0) {
+    return -1;
+  }
+  if (key_len != 32 || val_len != 64) {
+    return -1;
+  }
+  for (size_t i = 0; i < 32; i++) {
+    int c = key[i];
+    if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') &&
+        !(c >= 'A' && c <= 'F')) {
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < 64; i++) {
+    int c = val[i];
+    if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') &&
+        !(c >= 'A' && c <= 'F')) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
 /* ---- Validate ---- */
 
 static int in_range(const uint8_t *v, size_t n, uint64_t lo, uint64_t hi) {
@@ -735,6 +765,19 @@ int murmur_cfg_validate(sqlite3 *db, const char *name, const uint8_t *value,
   }
   if (strcmp(name, "files_dir") == 0) {
     return 0;
+  }
+  if (strcmp(name, "origin_key_file") == 0) {
+    return 0;
+  }
+  if (strcmp(name, "trusted_origins") == 0) {
+    if (len == 0) {
+      return 0;
+    }
+    if (!db || json_is(db, value, len, "object") != 0) {
+      return -1;
+    }
+    size_t walked = 0;
+    return walk_json(db, value, len, origin_row, NULL, 65536, &walked);
   }
   /* Bridge/file knobs and certificates: presence-checked only. */
   return 0;

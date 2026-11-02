@@ -18,6 +18,7 @@
 # MURMUR_VFS_STATS=1.
 
 CC      ?= cc
+.DEFAULT_GOAL := all
 CXX     ?= c++
 AR      ?= ar
 BUILD   := build
@@ -108,7 +109,67 @@ $(BUILD)/deps/keyring/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE)
 $(BUILD)/deps/argon2/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE)
 $(BUILD)/deps/murmur/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE)
 $(BUILD)/deps/murmur/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE)
+$(BUILD)/deps/murmur/cellsign.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE) $(INC_AWSLC)
 $(BUILD)/deps/murmur/origin.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE) $(INC_AWSLC)
+$(BUILD)/deps/murmur/bridge_codec.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE) $(INC_AWSLC)
+
+$(BUILD)/bridgecodectest: $(LIB) deps/murmur/bridge_codec_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_codec_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+.PHONY: bridgecheck
+bridgecheck: $(BUILD)/bridgecodectest
+	./$(BUILD)/bridgecodectest
+	./$(BUILD)/bridgestoretest
+	./$(BUILD)/bridgeownershiptest
+	./$(BUILD)/bridgerowstest
+	./$(BUILD)/bridgecapturetest
+	./$(BUILD)/bridgeferrytest
+	./$(BUILD)/bridgefilestest
+	./$(BUILD)/bridgepeertest
+	./$(BUILD)/bridgelowpeertest
+
+bridgecheck: $(BUILD)/bridgestoretest
+bridgecheck: $(BUILD)/bridgeownershiptest
+bridgecheck: $(BUILD)/bridgerowstest
+bridgecheck: $(BUILD)/bridgecapturetest
+bridgecheck: $(BUILD)/bridgeferrytest
+bridgecheck: $(BUILD)/bridgefilestest
+bridgecheck: $(BUILD)/bridgepeertest
+bridgecheck: $(BUILD)/bridgelowpeertest
+
+$(BUILD)/bridgelowpeertest: $(LIB) deps/murmur/bridge_low_peer_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_low_peer_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgepeertest: $(LIB) deps/murmur/bridge_peer_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_peer_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgefilestest: $(LIB) deps/murmur/bridge_files_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_files_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgeferrytest: $(LIB) deps/murmur/bridge_ferry_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_ferry_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgecapturetest: $(LIB) deps/murmur/bridge_capture_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_capture_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgerowstest: $(LIB) deps/murmur/bridge_rows_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_rows_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgeownershiptest: $(LIB) deps/murmur/bridge_ownership_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_ownership_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+$(BUILD)/bridgestoretest: $(LIB) deps/murmur/bridge_store_selftest.cc
+	$(CXX) $(OPT) -Wall -Wextra -Ideps/murmur -Ideps/sqlite deps/murmur/bridge_store_selftest.cc $(LIB) -lm -ldl -lpthread -o $@
+
+selftest: $(BUILD)/bridgecodectest
+selftest: $(BUILD)/bridgestoretest
+selftest: $(BUILD)/bridgeownershiptest
+selftest: $(BUILD)/bridgerowstest
+selftest: $(BUILD)/bridgecapturetest
+selftest: $(BUILD)/bridgeferrytest
+selftest: $(BUILD)/bridgefilestest
+selftest: $(BUILD)/bridgepeertest
+selftest: $(BUILD)/bridgelowpeertest
 $(BUILD)/deps/vec0/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_SQLITE) -Wno-unused-function
 $(BUILD)/libmurmur.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_SQLITE) -I.
 
@@ -126,6 +187,15 @@ selftest: $(BUILD)/membertest $(BUILD)/framingtest $(BUILD)/msgcodectest \
     $(BUILD)/vectest $(BUILD)/searchtest $(BUILD)/schedulertest $(BUILD)/origintest $(BUILD)/managedtest $(BUILD)/managedsearchtest $(BUILD)/causaltest $(BUILD)/managedpolicytest $(BUILD)/managedvaluetest $(BUILD)/managedorigintest $(BUILD)/managedschematest $(BUILD)/managedrowtest $(BUILD)/managedreplicatest
 
 selftest: $(BUILD)/managedmodeltest $(BUILD)/managedfaulttest $(BUILD)/schedulercontentiontest $(BUILD)/managedsearchoracletest $(BUILD)/managedfuzztest
+	$(BUILD)/bridgecodectest
+	$(BUILD)/bridgestoretest
+	$(BUILD)/bridgeownershiptest
+	$(BUILD)/bridgerowstest
+	$(BUILD)/bridgecapturetest
+	$(BUILD)/bridgeferrytest
+	$(BUILD)/bridgefilestest
+	$(BUILD)/bridgepeertest
+	$(BUILD)/bridgelowpeertest
 	$(BUILD)/membertest
 	$(BUILD)/framingtest
 	$(BUILD)/msgcodectest

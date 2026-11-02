@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/bridge"
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/driver"
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/files"
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
@@ -36,21 +38,26 @@ type Node struct {
 	Addr    string // QUIC bind/advertise host:port
 	TLS     *TlsPaths
 
-	mu      sync.Mutex
-	conn    *sqlite.Conn
-	native  *driver.Node
-	running bool
-	files   bool
-	fcfg    *FilesConfig
-	child   *childNode // non-nil for child-process mode
+	bootConfig      NodeConfig
+	mu              sync.Mutex
+	conn            *sqlite.Conn
+	native          *driver.Node
+	running         bool
+	bridgeCapture   bool
+	bridgeSender    *bridge.Sender
+	bridgeReceivers map[string]*bridge.Receiver
+	files           bool
+	fcfg            *FilesConfig
+	child           *childNode // non-nil for child-process mode
 }
 
 // FilesConfig stages the file-object store on a node.
 type FilesConfig struct {
-	Dir  string // object dir (created)
-	Key  [32]byte
-	IP   string // fetch bind IP (distinct 127.0.0.x per node)
-	Port uint16 // uniform cluster fetch port
+	FetchInterval time.Duration
+	Dir           string // object dir (created)
+	Key           [32]byte
+	IP            string // fetch bind IP (distinct 127.0.0.x per node)
+	Port          uint16 // uniform cluster fetch port
 }
 
 // NodeConfig carries the boot parameters for one node.
@@ -70,6 +77,11 @@ type NodeConfig struct {
 	// per-peer schema_agreed diagnostic).
 	SchemaMaster bool
 	Files        *FilesConfig
+	// OriginSeed, when 32 bytes, provisions origin signing: the
+	// seed is written to data/origin.seed and origin_key_file is
+	// set before replication starts. Combine with
+	// Cluster.EnforceOrigins for full origin enforcement.
+	OriginSeed []byte
 }
 
 // BootNode creates the store, keys it, writes identity/settings, and
@@ -81,7 +93,7 @@ func BootNode(cfg NodeConfig) (*Node, error) {
 	if cfg.Child {
 		return bootChild(cfg)
 	}
-	n := &Node{Dir: cfg.Dir, ID: cfg.ID, Addr: cfg.Addr, TLS: cfg.TLS}
+	n := &Node{Dir: cfg.Dir, ID: cfg.ID, Addr: cfg.Addr, TLS: cfg.TLS, bootConfig: cfg}
 	dataDir := filepath.Join(cfg.Dir, "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
@@ -133,6 +145,18 @@ func BootNode(cfg NodeConfig) (*Node, error) {
 		settings["schema_master_enabled"] = "1"
 		settings["schema_master"] = Hex(cfg.ID[:])
 	}
+	if len(cfg.OriginSeed) > 0 {
+		if len(cfg.OriginSeed) != 32 {
+			conn.Close()
+			return nil, fmt.Errorf("origin seed must be exactly 32 bytes")
+		}
+		seedPath := filepath.Join(dataDir, "origin.seed")
+		if err := os.WriteFile(seedPath, cfg.OriginSeed, 0o600); err != nil {
+			conn.Close()
+			return nil, fmtErr("write origin seed", err)
+		}
+		settings["origin_key_file"] = seedPath
+	}
 	for k, v := range settings {
 		if err := driver.SetSetting(db, k, v); err != nil {
 			conn.Close()
@@ -148,8 +172,8 @@ func BootNode(cfg NodeConfig) (*Node, error) {
 			conn.Close()
 			return nil, err
 		}
-		if err := files.Stage(n.native.NativeDriver(), cfg.Files.Dir,
-			cfg.Files.Key, cfg.Files.IP, cfg.Files.Port); err != nil {
+		if err := files.StageWithInterval(n.native.NativeDriver(), cfg.Files.Dir,
+			cfg.Files.Key, cfg.Files.IP, cfg.Files.Port, cfg.Files.FetchInterval); err != nil {
 			n.native.Close()
 			conn.Close()
 			return nil, err
@@ -164,6 +188,31 @@ func BootNode(cfg NodeConfig) (*Node, error) {
 		n.running = true
 	}
 	return n, nil
+}
+
+// SetSetting validates and persists one murmur setting live
+// (in-process nodes only; trust changes apply to the next batch).
+func (n *Node) SetSetting(name, value string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.child != nil {
+		return fmt.Errorf("harness: SetSetting unsupported in child mode")
+	}
+	sqlite.LockWriter()
+	defer sqlite.UnlockWriter()
+	return driver.SetSetting(n.conn.NativeDB(), name, value)
+}
+
+// SiteHex returns the cr-sqlite site id as lowercase hex.
+func (n *Node) SiteHex() (string, error) {
+	rows, err := n.Simple("SELECT crsql_site_id()")
+	if err != nil {
+		return "", err
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 || len(rows[0][0]) != 32 {
+		return "", fmt.Errorf("harness: bad site id %v", rows)
+	}
+	return rows[0][0], nil
 }
 
 // IDHex renders the node id.
@@ -220,6 +269,15 @@ func (n *Node) Close() error {
 	if n.child != nil {
 		return n.child.close()
 	}
+	if n.bridgeSender != nil {
+		n.bridgeSender.Close()
+		n.bridgeSender = nil
+	}
+	for key, receiver := range n.bridgeReceivers {
+		receiver.Close()
+		delete(n.bridgeReceivers, key)
+	}
+	n.bridgeCapture = false
 	if n.native != nil {
 		if n.running {
 			n.native.Stop()
@@ -298,24 +356,35 @@ func (n *Node) Execute(query string, args ...any) (int64, error) {
 	}
 	sqlite.LockWriter()
 	defer sqlite.UnlockWriter()
-	st, err := n.conn.Prepare(TranslateParams(query))
-	if err != nil {
-		return 0, err
-	}
-	defer st.Close()
-	for i, a := range args {
-		if err := bindAny(st, i+1, a); err != nil {
-			return 0, err
+	var affected int64
+	execute := func() error {
+		st, err := n.conn.Prepare(TranslateParams(query))
+		if err != nil {
+			return err
 		}
+		defer st.Close()
+		for i, a := range args {
+			if err := bindAny(st, i+1, a); err != nil {
+				return err
+			}
+		}
+		done, err := st.Step()
+		if err != nil {
+			return err
+		}
+		if !done {
+			return fmt.Errorf("execute returned rows")
+		}
+		affected = n.conn.Changes()
+		return nil
 	}
-	done, err := st.Step()
-	if err != nil {
-		return 0, err
+	var err error
+	if n.bridgeCapture {
+		err = bridge.Write(n.conn, func(*sqlite.Conn) error { return execute() })
+	} else {
+		err = execute()
 	}
-	if !done {
-		return 0, fmt.Errorf("execute returned rows")
-	}
-	return n.conn.Changes(), nil
+	return affected, err
 }
 
 // ExecBatch runs multi-statement SQL.
@@ -442,6 +511,19 @@ func (n *Node) PeerAdd(addr string) error {
 		return n.child.peerAdd(addr)
 	}
 	return n.native.AddSeed(addr)
+}
+
+// RemovePeer excludes a node durably and closes its active native
+// sessions (MURMUR PEER REMOVE).
+func (n *Node) RemovePeer(id [16]byte) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.child != nil {
+		return fmt.Errorf("remove peer requires an in-process node")
+	}
+	sqlite.LockWriter()
+	defer sqlite.UnlockWriter()
+	return n.native.RemovePeer(n.conn, id)
 }
 
 // PeerRow is one decoded SHOW PEERS row.

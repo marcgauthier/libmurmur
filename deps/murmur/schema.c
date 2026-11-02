@@ -1576,6 +1576,7 @@ murmur_sync_status_t murmur_schema_pairs(sqlite3 *db,
   }
   murmur_schema_entry_t *v = NULL;
   size_t count = 0, cap = 0;
+ int native_owned = 0;
   murmur_sync_status_t status = MURMUR_SYNC_OK;
   for (;;) {
     rc = sqlite3_step(st);
@@ -1598,13 +1599,13 @@ murmur_sync_status_t murmur_schema_pairs(sqlite3 *db,
       ddl_n = 0;
     }
     if (name_n >= 7 && memcmp(name, "murmur_", 7) == 0) {
-      /* murmur_file_meta is the one internal table replicated through
-       * the mesh (file metadata rides crsql_changes like user rows).
-       * It is created identically by ensure_schema on every node, so it
-       * is excluded from the replicated subset instead of failing the
-       * handshake digest. Every other murmur_* CRR still fails closed.
-       * (Go SchemaPairs has no such table and keeps failing.) */
-      if (name_n == 16 && memcmp(name, "murmur_file_meta", 16) == 0) {
+      /* Native-owned file metadata and the opt-in signed High ownership
+       * journal have fixed declarations on participating nodes. They are not
+       * remote application DDL. Journal payloads are authenticated and joined
+       * inside the same transaction as CRR ingestion. */
+      if ((name_n == 16 && memcmp(name, "murmur_file_meta", 16) == 0) ||
+          (name_n == 22 && memcmp(name,"murmur_bridge_peer_log",22)==0)) {
+        native_owned = 1;
         continue;
       }
       status = MURMUR_SYNC_INVALID;
@@ -1645,7 +1646,7 @@ murmur_sync_status_t murmur_schema_pairs(sqlite3 *db,
     count++;
   }
   sqlite3_finalize(st);
-  if (status == MURMUR_SYNC_OK && count == 0) {
+  if (status == MURMUR_SYNC_OK && count == 0 && !native_owned) {
     status = MURMUR_SYNC_INVALID;
     set_sqlrc(sqlrc, SQLITE_MISUSE);
   }

@@ -513,7 +513,7 @@ func FinishSnapshot(backend tx.Backend, params *SnapshotParams, source, transfer
 // BuildSnapshotFor builds a snapshot for recipient over a
 // prefix-consistent full export (pages from version 0). Chunks land
 // in the donor's local kv only; the manifest must fit one frame.
-func BuildSnapshotFor(db *sqlite.Conn, backend tx.Backend, params *SnapshotParams, batchBytes, maxBatchBytes int, recipient NodeID, now uint64) (tx.Manifest, error) {
+func BuildSnapshotFor(db *sqlite.Conn, backend tx.Backend, params *SnapshotParams, batchBytes, maxBatchBytes int, recipient NodeID, now uint64, signer *CellSigner) (tx.Manifest, error) {
 	var zero tx.Manifest
 	schemaRaw, err := backend.Schema()
 	if err != nil {
@@ -527,7 +527,7 @@ func BuildSnapshotFor(db *sqlite.Conn, backend tx.Backend, params *SnapshotParam
 	var pages [][]byte
 	cursor := Cursor{}
 	for {
-		batch, err := Export(db, cursor, batchBytes, maxBatchBytes)
+		batch, err := Export(db, cursor, batchBytes, maxBatchBytes, signer)
 		if err != nil {
 			return zero, err
 		}
@@ -586,7 +586,10 @@ func (e *Engine) ServeSnapshot(peer NodeID, w io.Writer, r io.Reader, req MsgSna
 		return err
 	}
 	backend := NewBackend(e.db, group, node)
-	manifest, err := BuildSnapshotFor(e.db, backend, params, p.batchBytes, p.maxBatchBytes, peer, tx.NowMillis())
+	e.mu.Lock()
+	signer := e.signer
+	e.mu.Unlock()
+	manifest, err := BuildSnapshotFor(e.db, backend, params, p.batchBytes, p.maxBatchBytes, peer, tx.NowMillis(), signer)
 	if err != nil {
 		return err
 	}

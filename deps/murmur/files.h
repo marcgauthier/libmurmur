@@ -84,6 +84,8 @@ murmur_files_status_t murmur_files_open(const murmur_files_config_t *config,
                                         int *sqlrc);
 void murmur_files_close(murmur_files_t *o);
 
+/* Borrowed SQL connection; file resources must be closed before this handle. */
+sqlite3 *murmur_files_database(const murmur_files_t *);
 /* Store directory (borrowed; for the fetch staging paths). */
 const char *murmur_files_directory(const murmur_files_t *o);
 
@@ -113,6 +115,16 @@ murmur_files_status_t murmur_files_upload_append(murmur_file_upload_t *u,
 murmur_files_status_t murmur_files_finish_upload(
     murmur_files_t *o, murmur_file_upload_t *u, murmur_files_meta_t *meta_out,
     char **detail_out, int *sqlrc);
+/* Finish with a synchronous callback in the SAME transaction as metadata.
+ * The encrypted object is synced first. Callback failure rolls back metadata
+ * and its SQL effects. The upload is consumed on success or failure.
+ * Call outside writer admission and SQL transactions: file gate precedes
+ * writer admission. Callback must not call file APIs or change transaction
+ * state. A post-COMMIT durability error is an uncertain committed outcome. */
+typedef int (*murmur_files_commit_fn)(sqlite3 *,const murmur_files_meta_t *,void *);
+murmur_files_status_t murmur_files_finish_upload_atomic(
+    murmur_files_t *,murmur_file_upload_t *,murmur_files_commit_fn,void *,
+    murmur_files_meta_t *,char **detail_out,int *sqlrc);
 void murmur_files_upload_abort(murmur_file_upload_t *u);
 
 /* Shared disk staging capacity. Release is idempotent. */
@@ -137,6 +149,8 @@ murmur_files_status_t murmur_files_download(murmur_files_t *o,
 murmur_files_status_t murmur_files_download_next(
     murmur_file_download_t *d, size_t limit, uint64_t *start_out,
     uint8_t *out_buf, size_t *n_out, int *done_out, char **detail_out);
+/* Borrowed pinned metadata, valid until download_close. */
+const murmur_files_meta_t *murmur_files_download_metadata(const murmur_file_download_t *);
 uint64_t murmur_files_download_bytes(const murmur_file_download_t *d);
 void murmur_files_download_close(murmur_file_download_t *d);
 

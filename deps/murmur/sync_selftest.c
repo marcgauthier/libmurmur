@@ -13,6 +13,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cellsign.h"
 #include "config.h"
 #include "engine.h"
 #include "kv.h"
@@ -114,6 +115,231 @@ static murmur_node_t node_fill(uint8_t b) {
   return n;
 }
 
+static int stage_all(sqlite3 *db, const murmur_node_t *node,
+                     const uint8_t *blob, size_t len);
+static void sha256sum(const uint8_t *blob, size_t len, uint8_t out[32]);
+
+static void hex_of(const uint8_t *in, size_t n, char *out) {
+  static const char *d = "0123456789abcdef";
+  for (size_t i = 0; i < n; i++) {
+    out[2 * i] = d[in[i] >> 4];
+    out[2 * i + 1] = d[in[i] & 15];
+  }
+  out[2 * n] = '\0';
+}
+
+static int set_trust(sqlite3 *db, const murmur_node_t *site,
+                     const uint8_t pub[32]) {
+  char sh[33], ph[65], val[128];
+  hex_of(site->b, 16, sh);
+  hex_of(pub, 32, ph);
+  snprintf(val, sizeof(val), "{\"%s\":\"%s\"}", sh, ph);
+  int sqlrc = 0;
+  return murmur_cfg_set_setting(db, "trusted_origins", (const uint8_t *)val,
+                                strlen(val), &sqlrc) == MURMUR_SYNC_OK;
+}
+
+static void test_origin_signatures(void) {
+  /* KAT: fixed seed + cell must match the Go TestOriginKAT
+   * signature (cross-language canonical lock). */
+  uint8_t seed[32];
+  for (int i = 0; i < 32; i++) {
+    seed[i] = (uint8_t)i;
+  }
+  uint8_t site[16];
+  for (int i = 0; i < 16; i++) {
+    site[i] = (uint8_t)(0xa0 + i);
+  }
+  static const uint8_t pk[] = {0x01, 0x09, 0x01};
+  murmur_cell_t kat;
+  memset(&kat, 0, sizeof(kat));
+  kat.table = (const uint8_t *)"t";
+  kat.table_len = 1;
+  kat.pk = pk;
+  kat.pk_len = sizeof(pk);
+  kat.cid = (const uint8_t *)"v";
+  kat.cid_len = 1;
+  kat.val_tag = 3;
+  kat.val_blob = (const uint8_t *)"hello";
+  kat.val_blob_len = 5;
+  kat.col_version = 1;
+  kat.site = site;
+  kat.site_len = 16;
+
+  sqlite3 *db = open_crr();
+  if (!db) {
+    return;
+  }
+  uint8_t sig[64];
+  CHECK(murmur_cellsign_sign(db, (const uint8_t *)"x", 1, sig) ==
+            SQLITE_MISUSE,
+        "sign without seed");
+  CHECK(murmur_cellsign_attach(db, seed) == SQLITE_OK, "attach");
+  uint8_t pub[32];
+  CHECK(murmur_cellsign_pubkey(seed, pub) == SQLITE_OK, "pubkey");
+  uint8_t canon[256];
+  size_t canon_len = murmur_cell_canonical(&kat, canon, sizeof(canon));
+  CHECK(canon_len > 0, "canonical");
+  CHECK(murmur_cellsign_sign(db, canon, canon_len, sig) == SQLITE_OK,
+        "sign");
+  char sighex[129];
+  hex_of(sig, 64, sighex);
+  CHECK(strcmp(sighex, "8712725f405add2530e7cf0f44722008a825fa31ecc5f45197d32"
+                       "37ac5768613cc48c23c1b0818d7536c0acb232b0d422eb9503ee4a"
+                       "6dfe81e299732a90f890f") == 0,
+        "KAT sig %s", sighex);
+  CHECK(murmur_cellsign_verify(pub, canon, canon_len, sig) == SQLITE_OK,
+        "verify");
+  canon[20] ^= 1;
+  CHECK(murmur_cellsign_verify(pub, canon, canon_len, sig) == SQLITE_AUTH,
+        "tamper refused");
+  murmur_cellsign_detach(db);
+  CHECK(murmur_cellsign_sign(db, (const uint8_t *)"x", 1, sig) ==
+            SQLITE_MISUSE,
+        "sign after detach");
+
+  /* Trust registry + sig store. */
+  murmur_node_t self;
+  int sqlrc = 0;
+  CHECK(murmur_sync_site_id(db, &self, &sqlrc) == MURMUR_SYNC_OK, "site");
+  CHECK(set_trust(db, &self, pub), "set trust");
+  murmur_cellsign_trust_t trust;
+  memset(&trust, 0, sizeof(trust));
+  CHECK(murmur_cellsign_trust_load(db, &trust, &sqlrc) == SQLITE_OK &&
+            trust.n == 1,
+        "trust load");
+  CHECK(murmur_cellsign_trust_find(&trust, self.b) != NULL, "trust hit");
+  murmur_node_t stranger = node_fill(0xee);
+  CHECK(murmur_cellsign_trust_find(&trust, stranger.b) == NULL,
+        "trust miss");
+  murmur_cellsign_trust_free(&trust);
+  CHECK(murmur_cellsign_store(db, kat.table, kat.table_len, kat.pk,
+                              kat.pk_len, kat.cid, kat.cid_len, self.b, 9,
+                              sig, &sqlrc) == SQLITE_OK,
+        "store");
+  uint8_t got[64];
+  CHECK(murmur_cellsign_lookup(db, kat.table, kat.table_len, kat.pk,
+                               kat.pk_len, kat.cid, kat.cid_len, self.b, 9,
+                               got, &sqlrc) == 1 &&
+            memcmp(got, sig, 64) == 0,
+        "lookup");
+  CHECK(murmur_cellsign_lookup(db, kat.table, kat.table_len, kat.pk,
+                               kat.pk_len, kat.cid, kat.cid_len, self.b, 10,
+                               got, &sqlrc) == 0,
+        "lookup miss");
+  /* No matching change row: gc drops the orphan. */
+  CHECK(murmur_cellsign_gc(db, &sqlrc) == SQLITE_OK, "gc");
+  CHECK(murmur_cellsign_lookup(db, kat.table, kat.table_len, kat.pk,
+                               kat.pk_len, kat.cid, kat.cid_len, self.b, 9,
+                               got, &sqlrc) == 0,
+        "gc dropped orphan");
+  close_crr(db);
+}
+
+static void test_enforced_sync(void) {
+  sqlite3 *donor = open_crr();
+  if (!donor) {
+    return;
+  }
+  make_sync_table(donor, "t");
+  exec_ok(donor, "INSERT INTO t VALUES(1,'x');", "insert");
+  uint8_t seed[32];
+  for (int i = 0; i < 32; i++) {
+    seed[i] = (uint8_t)(0x40 + i);
+  }
+  uint8_t pub[32];
+  murmur_cellsign_pubkey(seed, pub);
+  murmur_node_t donor_site;
+  int sqlrc = 0;
+  CHECK(murmur_sync_site_id(donor, &donor_site, &sqlrc) == MURMUR_SYNC_OK,
+        "donor site");
+  CHECK(set_trust(donor, &donor_site, pub), "donor trust");
+  murmur_cursor_t from;
+  memset(&from, 0, sizeof(from));
+  murmur_export_t batch;
+  memset(&batch, 0, sizeof(batch));
+  /* No seed attached: enforced export fails AUTH. */
+  CHECK(murmur_sync_export(donor, &from, 1 << 20, 1 << 20, &batch,
+                           &sqlrc) == MURMUR_SYNC_AUTH,
+        "signerless export");
+  CHECK(murmur_cellsign_attach(donor, seed) == SQLITE_OK, "attach");
+  CHECK(murmur_sync_export(donor, &from, 1 << 20, 1 << 20, &batch,
+                           &sqlrc) == MURMUR_SYNC_OK,
+        "signed export");
+  CHECK(batch.blob_len >= 12 && batch.blob[4] == 2, "v2 header");
+
+  sqlite3 *rcv = open_crr();
+  if (!rcv) {
+    murmur_sync_export_free(&batch);
+    close_crr(donor);
+    return;
+  }
+  make_sync_table(rcv, "t");
+  CHECK(set_trust(rcv, &donor_site, pub), "receiver trust");
+  murmur_node_t donor_node = node_fill(0x11);
+  CHECK(murmur_sync_reset(rcv, &donor_node, &donor_site, &sqlrc) ==
+            MURMUR_SYNC_OK,
+        "reset");
+  murmur_node_t site;
+  int has_site = 0;
+  murmur_stored_cursor_t previous;
+  memset(&previous, 0, sizeof(previous));
+  CHECK(murmur_sync_progress(rcv, &donor_node, &site, &has_site, &previous,
+                             &sqlrc) == MURMUR_SYNC_OK,
+        "progress");
+  CHECK(stage_all(rcv, &donor_node, batch.blob, batch.blob_len), "stage");
+  uint8_t digest[32];
+  sha256sum(batch.blob, batch.blob_len, digest);
+  CHECK(murmur_sync_apply(rcv, &donor_node, &donor_site, &previous.cursor,
+                          &batch.next.cursor, batch.blob_len, digest,
+                          &sqlrc) == MURMUR_SYNC_OK,
+        "honest apply");
+  CHECK(count_rows(rcv, "SELECT COUNT(*) FROM murmur_cell_sigs") == 1,
+        "sig stored");
+  murmur_sync_cursor_free(&previous);
+
+  /* Forged value, original sig: refused. */
+  uint32_t count = (uint32_t)batch.blob[8] | ((uint32_t)batch.blob[9] << 8) |
+                   ((uint32_t)batch.blob[10] << 16) |
+                   ((uint32_t)batch.blob[11] << 24);
+  murmur_cell_t *cells =
+      (murmur_cell_t *)malloc((size_t)(count ? count : 1) * sizeof(*cells));
+  size_t n = 0;
+  CHECK(cells && murmur_cells_decode(batch.blob, batch.blob_len, cells,
+                                     count, &n) == MURMUR_OK && n == count,
+        "decode v2");
+  if (cells && n > 0) {
+    cells[0].val_blob = (const uint8_t *)"forged!";
+    cells[0].val_blob_len = 7;
+    size_t cap = batch.blob_len + 16;
+    uint8_t *forged = (uint8_t *)malloc(cap);
+    size_t flen = forged ? murmur_cells_encode_v2(cells, n, forged, cap) : 0;
+    CHECK(flen > 0, "forge encode");
+    if (flen > 0) {
+      CHECK(murmur_sync_reset(rcv, &donor_node, &donor_site, &sqlrc) ==
+                MURMUR_SYNC_OK,
+            "reset2");
+      murmur_stored_cursor_t prev2;
+      memset(&prev2, 0, sizeof(prev2));
+      murmur_sync_progress(rcv, &donor_node, &site, &has_site, &prev2,
+                           &sqlrc);
+      CHECK(stage_all(rcv, &donor_node, forged, flen), "stage forged");
+      uint8_t d2[32];
+      sha256sum(forged, flen, d2);
+      CHECK(murmur_sync_apply(rcv, &donor_node, &donor_site, &prev2.cursor,
+                              &batch.next.cursor, flen, d2,
+                              &sqlrc) == MURMUR_SYNC_AUTH,
+            "forgery refused");
+      murmur_sync_cursor_free(&prev2);
+    }
+    free(forged);
+  }
+  free(cells);
+  murmur_sync_export_free(&batch);
+  close_crr(rcv);
+  close_crr(donor);
+}
+
 static void test_export_roundtrip(void) {
   sqlite3 *db = open_crr();
   if (!db) {
@@ -161,6 +387,19 @@ static void test_export_roundtrip(void) {
   murmur_sync_export_free(&out);
   murmur_sync_export_free(&empty);
   close_crr(db);
+}
+
+static void test_native_journal_only_schema(void) {
+ sqlite3 *db=open_crr();if(!db)return;
+ uint8_t before[32],after[32];int sqlrc=0;
+ CHECK(murmur_schema_digest(db,before,&sqlrc)==MURMUR_SYNC_INVALID,"unconfigured empty schema accepted");
+ exec_ok(db,"CREATE TABLE murmur_bridge_peer_log(id BLOB PRIMARY KEY NOT NULL,body BLOB NOT NULL DEFAULT x''); SELECT crsql_as_crr('main','murmur_bridge_peer_log')","signed journal");
+ CHECK(murmur_schema_digest(db,before,&sqlrc)==MURMUR_SYNC_OK,"native-only schema rejected sqlrc=%d",sqlrc);
+ exec_ok(db,"CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,value TEXT)","semantic application table");
+ CHECK(murmur_schema_digest(db,after,&sqlrc)==MURMUR_SYNC_OK && !memcmp(before,after,32),"semantic tables changed raw transport schema");
+ murmur_schema_entry_t *entries=NULL;size_t count=0;
+ CHECK(murmur_schema_pairs(db,&entries,&count,&sqlrc)==MURMUR_SYNC_OK && count==0,"native journal leaked into remote DDL");
+ murmur_schema_pairs_free(entries,count);close_crr(db);
 }
 
 static void test_export_paginates(void) {
@@ -651,6 +890,89 @@ static void test_apply_guards(void) {
       close_crr(donor);
     }
   }
+}
+
+/* Transitive forwarding: a site pushes all sites' information, not
+ * just local data. A receiver re-exports imported cells mixed with
+ * its own, and a third node applies the mixed batch. */
+static void test_apply_accepts_forwarded_cells(void) {
+  sqlite3 *source = open_crr();
+  sqlite3 *relay = open_crr();
+  sqlite3 *db = open_crr();
+  if (!source || !relay || !db) {
+    if (source) {
+      close_crr(source);
+    }
+    if (relay) {
+      close_crr(relay);
+    }
+    if (db) {
+      close_crr(db);
+    }
+    return;
+  }
+  make_sync_table(source, "t");
+  make_sync_table(relay, "t");
+  make_sync_table(db, "t");
+  exec_ok(source, "INSERT INTO t VALUES(1,'source');", "source write");
+  int sqlrc = 0;
+  murmur_cursor_t from;
+  memset(&from, 0, sizeof(from));
+  murmur_export_t original;
+  memset(&original, 0, sizeof(original));
+  CHECK(murmur_sync_export(source, &from, 1 << 20, 1 << 20, &original,
+                           &sqlrc) == MURMUR_SYNC_OK,
+        "source export");
+  CHECK(murmur_sync_ingest_blob(relay, original.blob, original.blob_len,
+                                &sqlrc) == MURMUR_SYNC_OK,
+        "relay ingest");
+  exec_ok(relay, "INSERT INTO t VALUES(2,'relay');", "relay write");
+  /* The relay re-exports both the imported and the local cell. */
+  murmur_export_t forwarded;
+  memset(&forwarded, 0, sizeof(forwarded));
+  CHECK(murmur_sync_export(relay, &from, 1 << 20, 1 << 20, &forwarded,
+                           &sqlrc) == MURMUR_SYNC_OK,
+        "relay export");
+  murmur_cell_t cells[8];
+  size_t n = 0;
+  CHECK(murmur_cells_decode(forwarded.blob, forwarded.blob_len, cells, 8,
+                            &n) == MURMUR_OK && n == 2,
+        "forwarded cell count %zu", n);
+  murmur_node_t relay_site, source_site;
+  murmur_sync_site_id(relay, &relay_site, &sqlrc);
+  murmur_sync_site_id(source, &source_site, &sqlrc);
+  int saw_source = 0, saw_relay = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (cells[i].site_len == 16 &&
+        memcmp(cells[i].site, source_site.b, 16) == 0) {
+      saw_source = 1;
+    }
+    if (cells[i].site_len == 16 &&
+        memcmp(cells[i].site, relay_site.b, 16) == 0) {
+      saw_relay = 1;
+    }
+  }
+  CHECK(saw_source && saw_relay, "forwarded batch mixes sites");
+  /* A third node applies the mixed batch. */
+  murmur_node_t node = node_fill(0x22);
+  CHECK(murmur_sync_reset(db, &node, &relay_site, &sqlrc) == MURMUR_SYNC_OK,
+        "reset");
+  CHECK(stage_all(db, &node, forwarded.blob, forwarded.blob_len),
+        "stage forwarded");
+  murmur_cursor_t prev;
+  memset(&prev, 0, sizeof(prev));
+  uint8_t digest[32];
+  sha256sum(forwarded.blob, forwarded.blob_len, digest);
+  CHECK(murmur_sync_apply(db, &node, &relay_site, &prev, &forwarded.next.cursor,
+                          forwarded.blob_len, digest, &sqlrc) ==
+            MURMUR_SYNC_OK,
+        "forwarded apply rc=%d", sqlrc);
+  CHECK(count_rows(db, "SELECT COUNT(*) FROM t") == 2, "forwarded rows");
+  murmur_sync_export_free(&original);
+  murmur_sync_export_free(&forwarded);
+  close_crr(db);
+  close_crr(relay);
+  close_crr(source);
 }
 
 static void test_progress_misc(void) {
@@ -4928,12 +5250,16 @@ static void test_concurrent_txn(void) {
 
 int main(void) {
   test_export_roundtrip();
+  test_native_journal_only_schema();
   test_export_paginates();
   test_export_validation();
   test_export_optout();
   test_export_overloaded();
   test_stage_apply();
   test_apply_guards();
+  test_apply_accepts_forwarded_cells();
+  test_origin_signatures();
+  test_enforced_sync();
   test_progress_misc();
   test_retain_params();
   test_gc_stage();
@@ -4962,7 +5288,7 @@ int main(void) {
   test_concurrent_txn();
   test_serve_pull_multibatch();
   if (failures == 0) {
-    printf("SYNC-OK (34 suites)\n");
+    printf("SYNC-OK (38 suites)\n");
     return 0;
   }
   printf("SYNC-FAIL (%d)\n", failures);

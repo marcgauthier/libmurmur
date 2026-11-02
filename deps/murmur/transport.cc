@@ -49,6 +49,7 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/x509.h"
 #include "mbedtls/x509_crt.h"
+#include "mbedtls/x509_crl.h"
 #include "psa/crypto.h"
 
 // Non-static mbedtls-backend helpers without header declarations.
@@ -269,6 +270,9 @@ struct Endpoint {
     std::string last_error;
     uint32_t max_streams = 0;
     std::string alpn; // negotiated protocol; default MURMUR_QUIC_ALPN
+    // CRL head malloc'd at trust install; the verifier dispose frees
+    // its contents, the endpoint frees the head below.
+    mbedtls_x509_crl* crl_head = NULL;
 };
 
 // Parse "1.2.3.4/24" or bare IP (host route). v4 collapses to v4-mapped,
@@ -865,7 +869,7 @@ int murmur_install_chain(Endpoint* ep, const uint8_t** chain_der,
 }
 
 int murmur_install_trust(Endpoint* ep, const uint8_t** ca_der,
-    const size_t* ca_lens, size_t ca_n)
+    const size_t* ca_lens, size_t ca_n, const uint8_t* crl_der, size_t crl_len)
 {
     mbedtls_x509_crt* ca =
         (mbedtls_x509_crt*)malloc(sizeof(mbedtls_x509_crt));
@@ -880,10 +884,37 @@ int murmur_install_trust(Endpoint* ep, const uint8_t** ca_der,
             return -MURMUR_QUIC_INVALID;
         }
     }
+    mbedtls_x509_crl* crl = NULL;
+    if (crl_der != NULL && crl_len > 0) {
+        crl = (mbedtls_x509_crl*)malloc(sizeof(mbedtls_x509_crl));
+        if (crl == NULL) {
+            mbedtls_x509_crt_free(ca);
+            free(ca);
+            return -MURMUR_QUIC_BUSY;
+        }
+        mbedtls_x509_crl_init(crl);
+        // NUL-terminated copy: the parser auto-detects PEM vs DER.
+        std::vector<uint8_t> buf(crl_der, crl_der + crl_len);
+        buf.push_back(0);
+        if (mbedtls_x509_crl_parse(crl, buf.data(), buf.size()) != 0) {
+            mbedtls_x509_crl_free(crl);
+            free(crl);
+            mbedtls_x509_crt_free(ca);
+            free(ca);
+            set_error(ep, "CRL does not parse");
+            return -MURMUR_QUIC_INVALID;
+        }
+        ep->crl_head = crl;
+    }
     ptls_mbedtls_verify_certificate_t* v =
         ptls_mbedssl_init_verify_certificate_complete(
-            ca, NULL, murmur_f_vrfy, ep);
+            ca, crl, murmur_f_vrfy, ep);
     if (v == NULL) {
+        if (crl != NULL) {
+            mbedtls_x509_crl_free(crl);
+            free(crl);
+            ep->crl_head = NULL;
+        }
         mbedtls_x509_crt_free(ca);
         free(ca);
         return -MURMUR_QUIC_BUSY;
@@ -908,6 +939,9 @@ void murmur_endpoint_destroy(Endpoint* ep)
         picoquic_free(ep->quic);
         ep->quic = NULL;
     }
+    // The verifier dispose freed the CRL contents; free the head.
+    free(ep->crl_head);
+    ep->crl_head = NULL;
     if (ep->sock >= 0) {
         close(ep->sock);
         ep->sock = -1;
@@ -927,20 +961,22 @@ int murmur_quic_create(murmur_quic_t** out, const char* bind_ip,
     uint16_t bind_port, const uint8_t** chain_der, const size_t* chain_lens,
     size_t chain_n, const uint8_t* key_pem, size_t key_len,
     const uint8_t** ca_der, const size_t* ca_lens, size_t ca_n,
+    const uint8_t* crl_der, size_t crl_len,
     const murmur_node_t* self, const murmur_node_t* allowed, size_t n_allowed,
     const char** allow_cidrs, size_t n_cidrs, uint32_t max_conns,
     uint32_t sessions)
 {
     return murmur_quic_create_alpn(out, bind_ip, bind_port, chain_der,
-        chain_lens, chain_n, key_pem, key_len, ca_der, ca_lens, ca_n, self,
-        allowed, n_allowed, allow_cidrs, n_cidrs, max_conns, sessions,
-        MURMUR_QUIC_ALPN);
+        chain_lens, chain_n, key_pem, key_len, ca_der, ca_lens, ca_n,
+        crl_der, crl_len, self, allowed, n_allowed, allow_cidrs, n_cidrs,
+        max_conns, sessions, MURMUR_QUIC_ALPN);
 }
 
 int murmur_quic_create_alpn(murmur_quic_t** out, const char* bind_ip,
     uint16_t bind_port, const uint8_t** chain_der, const size_t* chain_lens,
     size_t chain_n, const uint8_t* key_pem, size_t key_len,
     const uint8_t** ca_der, const size_t* ca_lens, size_t ca_n,
+    const uint8_t* crl_der, size_t crl_len,
     const murmur_node_t* self, const murmur_node_t* allowed, size_t n_allowed,
     const char** allow_cidrs, size_t n_cidrs, uint32_t max_conns,
     uint32_t sessions, const char* alpn)
@@ -1041,7 +1077,8 @@ int murmur_quic_create_alpn(murmur_quic_t** out, const char* bind_ip,
         murmur_endpoint_destroy(ep.release());
         return -MURMUR_QUIC_INVALID;
     }
-    rc = murmur_install_trust(ep.get(), ca_der, ca_lens, ca_n);
+    rc = murmur_install_trust(ep.get(), ca_der, ca_lens, ca_n, crl_der,
+        crl_len);
     if (rc != 0) {
         murmur_endpoint_destroy(ep.release());
         return rc;

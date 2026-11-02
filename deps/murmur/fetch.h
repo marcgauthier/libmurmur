@@ -40,6 +40,8 @@ typedef struct {
   const uint8_t **ca_der;
   const size_t *ca_lens;
   size_t ca_n;
+  const uint8_t *crl_der; /* NULL/0 disables revocation */
+  size_t crl_len;
   murmur_node_t self;
   const murmur_node_t *allowed; /* empty = all authenticated */
   size_t n_allowed;

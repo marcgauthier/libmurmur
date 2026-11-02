@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS murmur_kv(key BLOB PRIMARY KEY,value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS murmur_file_chunks(digest BLOB NOT NULL,generation INTEGER NOT NULL,idx INTEGER NOT NULL,bytes BLOB NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(digest,generation,idx));
 CREATE TABLE IF NOT EXISTS murmur_file_transfers(transfer BLOB PRIMARY KEY,digest BLOB,generation INTEGER,total_bytes INTEGER,identity BLOB,created_ms INTEGER NOT NULL,updated_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS murmur_file_staging(transfer BLOB NOT NULL,idx INTEGER NOT NULL,bytes BLOB NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(transfer,idx));
+CREATE TABLE IF NOT EXISTS murmur_cell_sigs("table" BLOB NOT NULL,pk BLOB NOT NULL,cid BLOB NOT NULL,site BLOB NOT NULL,col_version INTEGER NOT NULL,sig BLOB NOT NULL,PRIMARY KEY("table",pk,cid,site,col_version));
 `
 
 // EnsureSchema installs the metadata tables on db.

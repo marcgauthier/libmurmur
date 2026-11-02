@@ -13,7 +13,10 @@ package files
 import "C"
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"time"
 	"unsafe"
 )
 
@@ -35,6 +38,31 @@ const (
 // fetchPort is the uniform cluster fetch port; bindIP is this node's
 // loopback IP (nodes share the port via distinct 127.0.0.x).
 func Stage(drv unsafe.Pointer, dir string, key [32]byte, bindIP string, fetchPort uint16) error {
+	return StageWithInterval(drv, dir, key, bindIP, fetchPort, 0)
+}
+
+// StageWithInterval exposes the native peer-fetch cadence. Zero keeps the
+// native default; positive intervals must be whole milliseconds.
+func StageWithInterval(drv unsafe.Pointer, dir string, key [32]byte, bindIP string, fetchPort uint16, interval time.Duration) error {
+	return StageConfig(drv, Config{Directory: dir, Key: key, BindIP: bindIP, FetchPort: fetchPort, FetchInterval: interval})
+}
+
+// Config supplies the file store's native limits and fetch endpoint.
+type Config struct {
+	Directory, BindIP             string
+	Key                           [32]byte
+	FetchPort                     uint16
+	FetchInterval                 time.Duration
+	MaxFileBytes, MaxStagingBytes uint64
+}
+
+func StageConfig(drv unsafe.Pointer, config Config) error {
+	defer clear(config.Key[:])
+	dir, key, bindIP, fetchPort, interval := config.Directory, config.Key, config.BindIP, config.FetchPort, config.FetchInterval
+	defer clear(key[:])
+	if interval < 0 || interval%time.Millisecond != 0 {
+		return fmt.Errorf("files stage: invalid fetch interval")
+	}
 	cdir := C.CString(dir)
 	defer C.free(unsafe.Pointer(cdir))
 	cip := C.CString(bindIP)
@@ -45,6 +73,10 @@ func Stage(drv unsafe.Pointer, dir string, key [32]byte, bindIP string, fetchPor
 	C.memcpy(unsafe.Pointer(&cfg.key[0]), unsafe.Pointer(&key[0]), 32)
 	cfg.fetch_bind_ip = cip
 	cfg.fetch_port = C.uint16_t(fetchPort)
+	cfg.fetch_interval_ms = C.uint64_t(interval / time.Millisecond)
+	cfg.max_file_bytes = C.uint64_t(config.MaxFileBytes)
+	cfg.max_staging_bytes = C.uint64_t(config.MaxStagingBytes)
+	defer clear(unsafe.Slice((*byte)(unsafe.Pointer(&cfg.key[0])), 32))
 	var detail *C.char
 	var sqlrc C.int
 	st := C.murmur_driver_files_open((*C.murmur_driver_t)(drv), &cfg, &detail, &sqlrc)
@@ -218,4 +250,114 @@ func List(store unsafe.Pointer) ([]Meta, error) {
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// Upload streams plaintext into the native encrypted object store. The caller
+// retains the store until this operation returns and must not hold SQL admission.
+func Upload(ctx context.Context, store unsafe.Pointer, name string, source io.Reader) error {
+	if store == nil || source == nil {
+		return fmt.Errorf("file store and reader are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	o := (*C.murmur_files_t)(store)
+	var upload *C.murmur_file_upload_t
+	var detail *C.char
+	var sqlrc C.int
+	if st := C.murmur_files_begin_upload(o, cname, &upload, &detail, &sqlrc); st != C.MURMUR_FILES_OK {
+		return callErr("begin upload", st, detail, sqlrc)
+	}
+	defer func() {
+		if upload != nil {
+			C.murmur_files_upload_abort(upload)
+		}
+	}()
+	var buffer [64 << 10]byte
+	defer clear(buffer[:])
+	empty := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := source.Read(buffer[:])
+		if n < 0 || n > len(buffer) {
+			return fmt.Errorf("invalid file reader byte count")
+		}
+		if n > 0 {
+			empty = 0
+			if st := C.murmur_files_upload_append(upload, (*C.uint8_t)(unsafe.Pointer(&buffer[0])), C.size_t(n), &detail); st != C.MURMUR_FILES_OK {
+				return callErr("append upload", st, detail, 0)
+			}
+		} else {
+			empty++
+			if empty >= 100 && err == nil {
+				return io.ErrNoProgress
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var meta C.murmur_files_meta_t
+	st := C.murmur_files_finish_upload(o, upload, &meta, &detail, &sqlrc)
+	upload = nil // finish consumes the upload on both success and failure.
+	if err := callErr("finish upload", st, detail, sqlrc); err != nil {
+		return err
+	}
+	C.murmur_files_meta_free(&meta)
+	return nil
+}
+
+// DownloadTo streams a pinned native object to destination with bounded memory.
+func DownloadTo(ctx context.Context, store unsafe.Pointer, name string, destination io.Writer) error {
+	if store == nil || destination == nil {
+		return fmt.Errorf("file store and writer are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	var download *C.murmur_file_download_t
+	var detail *C.char
+	var sqlrc C.int
+	if st := C.murmur_files_download((*C.murmur_files_t)(store), cname, &download, &detail, &sqlrc); st != C.MURMUR_FILES_OK {
+		return callErr("download", st, detail, sqlrc)
+	}
+	defer C.murmur_files_download_close(download)
+	var buffer [64 << 10]byte
+	defer clear(buffer[:])
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var start C.uint64_t
+		var n C.size_t
+		var done C.int
+		st := C.murmur_files_download_next(download, C.size_t(len(buffer)), &start, (*C.uint8_t)(unsafe.Pointer(&buffer[0])), &n, &done, &detail)
+		if err := callErr("download next", st, detail, 0); err != nil {
+			return err
+		}
+		if n > 0 {
+			written, err := destination.Write(buffer[:int(n)])
+			if err != nil {
+				return err
+			}
+			if written != int(n) {
+				return io.ErrShortWrite
+			}
+		}
+		if done != 0 {
+			return nil
+		}
+	}
 }

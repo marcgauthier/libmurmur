@@ -58,7 +58,7 @@ func GenerateCa() (*Ca, error) {
 		NotAfter:              time.Now().AddDate(30, 0, 0),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
 	if err != nil {
@@ -69,6 +69,23 @@ func GenerateCa() (*Ca, error) {
 		return nil, err
 	}
 	return &Ca{cert: cert, key: key, der: der}, nil
+}
+
+// IssueCRL mints a CRL revoking the given leaf serials, valid for
+// ttl from now. The PEM block type is "X509 CRL".
+func (c *Ca) IssueCRL(serials []*big.Int, ttl time.Duration) ([]byte, error) {
+	var revoked []pkix.RevokedCertificate
+	for _, s := range serials {
+		revoked = append(revoked, pkix.RevokedCertificate{SerialNumber: s, RevocationTime: time.Now()})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number: big.NewInt(time.Now().UnixNano()), ThisUpdate: time.Now().Add(-time.Minute),
+		NextUpdate: time.Now().Add(ttl), RevokedCertificates: revoked,
+	}, c.cert, c.key)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der}), nil
 }
 
 // CaPEM returns the PEM of the cluster CA certificate.

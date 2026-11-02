@@ -117,7 +117,8 @@ type Config struct {
 // included so reads behave identically with no engine running.
 var defaults = map[string]string{
 	"group_id": "", "advertise": "", "certificate": "", "private_key": "",
-	"ca": "", "crsqlite_extension": "",
+	"ca": "", "crl_file": "", "crsqlite_extension": "",
+	"origin_key_file": "", "trusted_origins": "",
 	"bind":                             "0.0.0.0:7443",
 	"bootstrap":                        "[]",
 	"allowed_peers":                    "[]",
@@ -404,6 +405,27 @@ func Validate(name, value string) error {
 		}
 		return nil
 	case "files_dir":
+		return nil
+	case "origin_key_file":
+		return nil
+	case "trusted_origins":
+		if value == "" {
+			return nil
+		}
+		var m map[string]string
+		if err := json.Unmarshal([]byte(value), &m); err != nil {
+			return err
+		}
+		for ks, vs := range m {
+			sb, err := hex.DecodeString(ks)
+			if err != nil || len(sb) != 16 {
+				return errors.New("trusted_origins keys must be 32-hex site ids")
+			}
+			pb, err := hex.DecodeString(vs)
+			if err != nil || len(pb) != 32 {
+				return errors.New("trusted_origins values must be 64-hex ed25519 pubkeys")
+			}
+		}
 		return nil
 	default:
 		// Bridge/file knobs and certificates: presence-checked only.

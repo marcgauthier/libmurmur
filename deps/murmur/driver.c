@@ -8,6 +8,8 @@
 #include <time.h>
 
 #include "config.h"
+#include "bridge_peer.h"
+extern int bridge_peer_finish_files(sqlite3 *,murmur_files_t *,int (*stop)(void *),void *);
 #include "member.h"
 #include "mbedtls/pem.h"
 #include "retain.h"
@@ -738,6 +740,7 @@ typedef struct {
   char *cert_file;
   char *key_file;
   char *ca_file;
+  char *crl_file;
   murmur_node_t *allowed;
   size_t n_allowed;
   char **cidrs;
@@ -750,6 +753,7 @@ static void quic_settings_free(quic_settings_t *q) {
   free(q->cert_file);
   free(q->key_file);
   free(q->ca_file);
+  free(q->crl_file);
   free(q->allowed);
   if (q->cidrs) {
     for (size_t i = 0; i < q->n_cidrs; i++) {
@@ -783,6 +787,11 @@ static murmur_sync_status_t load_quic_settings(sqlite3 *db, quic_settings_t *q,
     goto fail;
   }
   st = murmur_cfg_setting(db, "ca", &q->ca_file, sqlrc);
+  if (st != MURMUR_SYNC_OK) {
+    goto fail;
+  }
+  /* crl_file is optional: empty disables revocation checking. */
+  st = murmur_cfg_setting(db, "crl_file", &q->crl_file, sqlrc);
   if (st != MURMUR_SYNC_OK) {
     goto fail;
   }
@@ -1125,6 +1134,11 @@ static void *accept_thread(void *v) {
 typedef struct {
   murmur_driver_t *d;
   char addr[72];
+  /* Gossip-sourced dials bind the claimed node id: the TLS peer must
+   * match, or a rogue member entry could redirect the dial. Seed
+   * dials carry no expectation (has_expect == 0). */
+  murmur_node_t expect;
+  int has_expect;
 } dial_arg_t;
 
 static void dial_begin(murmur_driver_t *d, const char *addr) {
@@ -1216,6 +1230,14 @@ static void *dial_thread(void *v) {
   murmur_node_t peer;
   memset(&peer, 0, sizeof(peer));
   if (murmur_session_peer(qs, &peer) != 0 || peer_is_self(d, &peer)) {
+    murmur_session_close(qs);
+    murmur_session_release(qs);
+    dial_end(d, a->addr);
+    free(a);
+    return NULL;
+  }
+  if (a->has_expect && !murmur_node_eq(&a->expect, &peer)) {
+    /* Gossip claimed another node at this address: refuse the redirect. */
     murmur_session_close(qs);
     murmur_session_release(qs);
     dial_end(d, a->addr);
@@ -1495,6 +1517,7 @@ static void *sched_thread(void *v) {
         continue;
       }
       a->d = d;
+      a->has_expect = 0;
       strncpy(a->addr, addr, sizeof(a->addr) - 1);
       a->addr[sizeof(a->addr) - 1] = '\0';
       dial_begin(d, a->addr);
@@ -1525,6 +1548,8 @@ static void *sched_thread(void *v) {
         continue;
       }
       a->d = d;
+      a->expect = sources[i].node;
+      a->has_expect = 1;
       strncpy(a->addr, addr, sizeof(a->addr) - 1);
       a->addr[sizeof(a->addr) - 1] = '\0';
       dial_begin(d, a->addr);
@@ -1560,6 +1585,9 @@ static void *sched_thread(void *v) {
   }
 }
 
+static int bridge_stopping(void *context) {
+ murmur_driver_t *d=(murmur_driver_t *)context;pthread_mutex_lock(&d->mu);int stop=!d->running;pthread_mutex_unlock(&d->mu);return stop;
+}
 static void *tick_thread(void *v) {
   murmur_driver_t *d = (murmur_driver_t *)v;
   int n = 0;
@@ -1570,6 +1598,12 @@ static void *tick_thread(void *v) {
     if (!running) {
       return NULL;
     }
+    pthread_mutex_lock(&d->eng->mu);
+    sqlite3 *bridge_db=d->eng->db;
+    pthread_mutex_unlock(&d->eng->mu);
+    int bridge_rc=murmur_bridge_peer_poll(bridge_db);
+    if(bridge_rc!=SQLITE_OK)murmur_engine_record(d->eng,"bridge peer apply failed");
+    if(d->files && bridge_peer_finish_files(bridge_db,d->files,bridge_stopping,d)!=SQLITE_OK)murmur_engine_record(d->eng,"bridge peer file finish failed");
     murmur_engine_gossip(d->eng);
     murmur_engine_probe(d->eng, murmur_engine_wall_ms());
     if (++n >= DRIVER_RETENTION_TICKS) {
@@ -1702,6 +1736,8 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
   size_t n_chain = 0, n_ca = 0;
   uint8_t *key = NULL;
   size_t key_len = 0;
+  uint8_t *crl = NULL;
+  size_t crl_len = 0;
   murmur_quic_t *q = NULL;
   if (load_pem_certs(qs.cert_file, &chain, &chain_lens, &n_chain) != 0 ||
       read_file(qs.key_file, &key, &key_len) != 0 ||
@@ -1710,6 +1746,12 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
     set_sqlrc(sqlrc, SQLITE_OK);
     st = MURMUR_SYNC_INVALID;
     goto unwind_engine;
+  }
+  if (qs.crl_file[0] && read_file(qs.crl_file, &crl, &crl_len) != 0) {
+    set_detail(detail_out, "CRL file unreadable");
+    set_sqlrc(sqlrc, SQLITE_OK);
+    st = MURMUR_SYNC_INVALID;
+    goto unwind_tls;
   }
   const char **cidrs = NULL;
   if (qs.n_cidrs > 0) {
@@ -1725,7 +1767,7 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
   }
   int rc = murmur_quic_create(
       &q, bind_ip, bind_port, (const uint8_t **)chain, chain_lens, n_chain,
-      key, key_len, (const uint8_t **)ca, ca_lens, n_ca, &self,
+      key, key_len, (const uint8_t **)ca, ca_lens, n_ca, crl, crl_len, &self,
       qs.allowed, qs.n_allowed, cidrs, qs.n_cidrs, qs.sessions,
       qs.sessions);
   free(cidrs);
@@ -1748,6 +1790,8 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
     fc.ca_der = (const uint8_t **)ca;
     fc.ca_lens = ca_lens;
     fc.ca_n = n_ca;
+    fc.crl_der = crl;
+    fc.crl_len = crl_len;
     fc.self = self;
     fc.allowed = qs.allowed;
     fc.n_allowed = qs.n_allowed;
@@ -1771,6 +1815,8 @@ murmur_sync_status_t murmur_driver_start(murmur_driver_t *d,
   free_ders(chain, chain_lens, n_chain);
   free_ders(ca, ca_lens, n_ca);
   free(key);
+  free(crl);
+  crl = NULL;
   chain = NULL;
   ca = NULL;
   key = NULL;
@@ -1800,6 +1846,7 @@ unwind_tls:
   free_ders(chain, chain_lens, n_chain);
   free_ders(ca, ca_lens, n_ca);
   free(key);
+  free(crl);
 unwind_engine:
   quic_settings_free(&qs);
   murmur_driver_stop(d, NULL);

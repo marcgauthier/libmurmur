@@ -692,7 +692,7 @@ func runIngest(db, source *sqlite.Conn, read *statement, o options, random *uint
 		execDB(source, "COMMIT")
 		exports := []replication.BatchExport{}
 		for {
-			exp, err := replication.Export(source, cursor, batchBytes, 64<<20)
+			exp, err := replication.Export(source, cursor, batchBytes, 64<<20, nil)
 			if err != nil {
 				fail(fmt.Errorf("export: %w", err))
 			}

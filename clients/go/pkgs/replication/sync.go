@@ -198,7 +198,11 @@ func cellValue(st *sqlite.Stmt, col int) (CellVal, error) {
 // maxBatchBytes encoded, 1024 cells) and packs them into a CRSB blob
 // with a resume cursor. Tables mapped to false in the stored
 // table_replication map are skipped before any budget accounting.
-func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (BatchExport, error) {
+// When trusted_origins is configured, every cell carries its origin
+// signature (v2): local rows sign with signer, forwarded rows carry
+// their verified stored signature, and anything unsigned fails the
+// batch. A nil signer under enforcement fails on the first local row.
+func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int, signer *CellSigner) (BatchExport, error) {
 	if batchBytes < 0 || maxBatchBytes < 0 {
 		return BatchExport{}, errInvalid("negative batch budget")
 	}
@@ -245,6 +249,18 @@ func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (Batc
 			break
 		}
 	}
+	trust, err := LoadTrustMap(db)
+	if err != nil {
+		return BatchExport{}, err
+	}
+	enforcing := len(trust) > 0
+	var localSite NodeID
+	if enforcing {
+		localSite, err = SiteID(db)
+		if err != nil {
+			return BatchExport{}, err
+		}
+	}
 	st, err := db.Prepare(`SELECT "table",pk,cid,val,col_version,db_version,site_id,cl,seq FROM crsql_changes WHERE db_version>?1 AND db_version<=?2 AND (?3 IS NULL OR (db_version,seq,"table",pk,cid)>(?3,?4,?5,?6,?7)) ORDER BY db_version,seq,"table",pk,cid`)
 	if err != nil {
 		return BatchExport{}, err
@@ -262,6 +278,9 @@ func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (Batc
 		}
 	}
 	blob := []byte{'C', 'R', 'S', 'B', 1, 0, 0, 0, 0, 0, 0, 0}
+	if enforcing {
+		blob[4] = 2
+	}
 	var count uint32
 	var last *Key
 	done := true
@@ -319,7 +338,7 @@ func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (Batc
 			// Estimate without copying the value: text/blob
 			// length, 8 bytes per scalar, plus per-row
 			// overhead. Identical to the per-column loop it
-			// replaces.
+			// replaces. Enforcement adds the 68-byte sig field.
 			rowBytes := 64
 			for i := 0; i < 9; i++ {
 				switch row[i].Type() {
@@ -328,6 +347,9 @@ func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (Batc
 				default:
 					rowBytes += 8
 				}
+			}
+			if enforcing {
+				rowBytes += 68
 			}
 			if rowBytes > maxBatchBytes-emptyCRSBLen {
 				return BatchExport{}, errOverloaded("cell exceeds max batch")
@@ -355,7 +377,33 @@ func Export(db *sqlite.Conn, cursor Cursor, batchBytes, maxBatchBytes int) (Batc
 				CL:         row[7].Int64(),
 				Seq:        row[8].Int64(),
 			}
-			fields := EncodeCell(nil, cell)
+			encode := EncodeCell
+			if enforcing {
+				if len(cell.SiteID) != 16 {
+					return BatchExport{}, errProtocol("site not 16 bytes")
+				}
+				if bytes.Equal(cell.SiteID, localSite[:]) {
+					if signer == nil {
+						return BatchExport{}, errAuth("origin signing key not loaded")
+					}
+					sig := signer.SignCell(cell)
+					cell.Sig = sig[:]
+				} else {
+					sig, err := LookupCellSig(db, cell.Table, cell.PK, cell.CID, cell.SiteID, cell.ColVersion)
+					if err != nil {
+						return BatchExport{}, err
+					}
+					if len(sig) != 64 {
+						return BatchExport{}, errAuth("forwarded cell has no verified origin signature")
+					}
+					cell.Sig = sig
+				}
+				encode = EncodeCellV2
+			}
+			fields := encode(nil, cell)
+			if fields == nil {
+				return BatchExport{}, errProtocol("cell encode")
+			}
 			if len(blob)+len(fields) > maxBatchBytes {
 				return BatchExport{}, errOverloaded("batch exceeds max")
 			}
@@ -473,6 +521,13 @@ func Apply(db *sqlite.Conn, node, site NodeID, previous, next Cursor, length uin
 		}
 		if len(kept) == 0 {
 			skipIngest = true
+		} else if len(blob) >= 12 && blob[4] == 2 {
+			// Preserve v2: kept cells keep their origin
+			// signatures for ingest verification.
+			ingest = EncodeCellsV2(kept)
+			if ingest == nil {
+				return errProtocol("v2 re-encode")
+			}
 		} else {
 			ingest = EncodeCells(kept)
 		}
@@ -488,6 +543,9 @@ func Apply(db *sqlite.Conn, node, site NodeID, previous, next Cursor, length uin
 	}()
 	if !skipIngest {
 		if err := IngestBlob(db, ingest); err != nil {
+			return err
+		}
+		if err := CellSigGC(db); err != nil {
 			return err
 		}
 	}
@@ -871,13 +929,40 @@ func IngestCells(db *sqlite.Conn, cells []Cell) error {
 // IngestBlob merges one CRSB batch through cr-sqlite. Malformed
 // input fails the batch; the caller owns the transaction. Cells
 // carry cl opaquely (stored, echoed, never compared).
+//
+// Origin-signature gate: when trusted_origins is configured, v1
+// batches are refused and every v2 cell verifies against its pinned
+// origin key before cr-sqlite ever sees it; verified signatures
+// persist in murmur_cell_sigs for verbatim re-export. cr-sqlite
+// parses v1 only, so v2 always strips to v1 after verification.
 func IngestBlob(db *sqlite.Conn, blob []byte) error {
+	merge := blob
+	if len(blob) >= 12 && string(blob[:4]) == "CRSB" {
+		isV1 := blob[4] == 1 && blob[5] == 0 && blob[6] == 0 && blob[7] == 0
+		isV2 := blob[4] == 2 && blob[5] == 0 && blob[6] == 0 && blob[7] == 0
+		if isV1 || isV2 {
+			trust, err := LoadTrustMap(db)
+			if err != nil {
+				return err
+			}
+			if isV1 && len(trust) > 0 {
+				return errAuth("unsigned batch under origin enforcement")
+			}
+			if isV2 {
+				stripped, err := verifyBatch(db, blob, trust)
+				if err != nil {
+					return err
+				}
+				merge = stripped
+			}
+		}
+	}
 	st, err := db.Prepare("SELECT crsql_ingest_blob(?)")
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if err := st.BindBlob(1, blob); err != nil {
+	if err := st.BindBlob(1, merge); err != nil {
 		return err
 	}
 	// Like the reference query_row: the function returns one row.
@@ -889,4 +974,36 @@ func IngestBlob(db *sqlite.Conn, blob []byte) error {
 		return errProtocol("crsql_ingest_blob returned no row")
 	}
 	return nil
+}
+
+// verifyBatch checks every v2 cell against trust (when enforcing),
+// persists verified signatures, and returns the v1 strip for
+// cr-sqlite. Legacy receivers (empty trust) strip without verifying
+// or storing.
+func verifyBatch(db *sqlite.Conn, blob []byte, trust TrustMap) ([]byte, error) {
+	cells, err := DecodeCells(blob)
+	if err != nil {
+		return nil, err
+	}
+	if len(trust) > 0 {
+		for i := range cells {
+			c := &cells[i]
+			if len(c.SiteID) != 16 || len(c.Sig) != 64 {
+				return nil, errProtocol("v2 cell shape")
+			}
+			var site NodeID
+			copy(site[:], c.SiteID)
+			pub, ok := trust[site]
+			if !ok {
+				return nil, errAuth("cell from untrusted origin")
+			}
+			if !VerifyCell(pub, *c, c.Sig) {
+				return nil, errAuth("bad origin signature")
+			}
+			if err := StoreCellSig(db, c.Table, c.PK, c.CID, c.SiteID, c.ColVersion, c.Sig); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return EncodeCells(cells), nil
 }

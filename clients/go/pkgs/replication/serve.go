@@ -285,6 +285,11 @@ func (e *Engine) Handshake(w io.Writer, r io.Reader, outgoing bool, peer NodeID)
 	if h.Group != hello.Group || h.Node != peer || h.Site == selfSite || h.Site.IsZero() {
 		return 0, zeroAddr, errAuth("session group or identity mismatch")
 	}
+	// Excluded peers must never establish a session, in either
+	// direction. peer is the transport-authenticated id.
+	if excluded, err := isExcluded(e.db, peer); err != nil || excluded {
+		return 0, zeroAddr, errAuth("peer excluded")
+	}
 	// Handshake schemas are a fast-fail hint only when adoption is
 	// off; adopters proceed and converge through manifests.
 	if h.Schema != schema {
@@ -425,6 +430,7 @@ func (e *Engine) ServePull(peer NodeID, w io.Writer, r io.Reader, req MsgPull) e
 	e.mu.Lock()
 	group, node, site := e.group, e.node, e.site
 	serving := e.serving
+	signer := e.signer
 	e.mu.Unlock()
 	select {
 	case e.serveSem <- struct{}{}:
@@ -463,7 +469,7 @@ func (e *Engine) ServePull(peer NodeID, w io.Writer, r io.Reader, req MsgPull) e
 	if uint64(from) < watermark {
 		return errProtocol("cursor pruned; snapshot required")
 	}
-	batch, err := Export(e.db, previous, p.batchBytes, p.maxBatchBytes)
+	batch, err := Export(e.db, previous, p.batchBytes, p.maxBatchBytes, signer)
 	if err != nil {
 		return err
 	}

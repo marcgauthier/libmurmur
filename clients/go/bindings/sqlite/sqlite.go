@@ -19,6 +19,7 @@ package sqlite
 
 void murmur_db_writer_lock(void);
 void murmur_db_writer_unlock(void);
+static const char *goMainFilename(sqlite3 *db) { return sqlite3_db_filename(db, "main"); }
 
 static sqlite3_destructor_type goTransient(void) { return SQLITE_TRANSIENT; }
 */
@@ -194,6 +195,12 @@ func (c *Conn) Changes() int64 {
 // (no open transaction). Peer and wait controls require it.
 func (c *Conn) Autocommit() bool {
 	return C.sqlite3_get_autocommit(c.db) != 0
+}
+
+// MainFilename returns SQLite's resolved main-database path, or an empty string
+// for an in-memory database. The caller must reserve the connection.
+func (c *Conn) MainFilename() string {
+	return C.GoString(C.goMainFilename(c.db))
 }
 
 // LastInsertRowID reports the rowid of the last successful insert.
@@ -498,4 +505,18 @@ func (s *Stmt) bindOne(i int, a any) error {
 	default:
 		return fmt.Errorf("sqlite: cannot bind %T", a)
 	}
+}
+
+// MemoryUsed reports cache, prepared-statement and schema allocations owned
+// by this connection, using SQLite's native per-connection accounting.
+func (c *Conn) MemoryUsed() (int64, error) {
+	var total int64
+	for _, op := range []C.int{C.SQLITE_DBSTATUS_CACHE_USED, C.SQLITE_DBSTATUS_SCHEMA_USED, C.SQLITE_DBSTATUS_STMT_USED} {
+		var current, high C.int
+		if rc := C.sqlite3_db_status(c.db, op, &current, &high, 0); rc != C.SQLITE_OK {
+			return 0, errOf(c.db, rc)
+		}
+		total += int64(current)
+	}
+	return total, nil
 }

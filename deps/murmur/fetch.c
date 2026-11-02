@@ -837,9 +837,10 @@ murmur_files_status_t murmur_fetch_start(const murmur_fetch_config_t *config,
   int rc = murmur_quic_create_alpn(
       &s->quic, bind_ip, config->bind_port, config->chain_der,
       config->chain_lens, config->chain_n, config->key_pem, config->key_len,
-      config->ca_der, config->ca_lens, config->ca_n, &config->self,
-      config->allowed, config->n_allowed, config->allow_cidrs,
-      config->n_cidrs, config->max_conns, 32, MURMUR_FETCH_ALPN);
+      config->ca_der, config->ca_lens, config->ca_n, config->crl_der,
+      config->crl_len, &config->self, config->allowed, config->n_allowed,
+      config->allow_cidrs, config->n_cidrs, config->max_conns, 32,
+      MURMUR_FETCH_ALPN);
   if (rc != 0) {
     char err[256];
     if (s->quic) {

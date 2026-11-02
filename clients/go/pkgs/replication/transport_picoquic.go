@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"net"
+	"os"
 	"runtime"
 	"time"
 
@@ -51,7 +52,14 @@ func ListenPicoquic(db *sqlite.Conn, node NodeID) (*PicoquicTransport, error) {
 	for _, n := range p.allowedNets {
 		cidrs = append(cidrs, n.String())
 	}
-	ep, err := picoquic.Create(p.bind, chain, keyPEM, caDER,
+	var crlDER []byte
+	if p.crlFile != "" {
+		crlDER, err = os.ReadFile(p.crlFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+	ep, err := picoquic.Create(p.bind, chain, keyPEM, caDER, crlDER,
 		[16]byte(node), allowed, cidrs, p.sessions)
 	if err != nil {
 		return nil, mapQuicError(err)

@@ -7,6 +7,7 @@ package driver
 #cgo CFLAGS: -I../../../.. -I../../../../deps/murmur -I../../../../deps/sqlite -I../../../../deps/keyring -I../../../../deps/crsqlite/include -O2
 #cgo LDFLAGS: ${SRCDIR}/../../../../libmurmur.a -lstdc++ -lpthread -ldl -lm
 #include <stdlib.h>
+#include <string.h>
 #include "libmurmur.h"
 #include "sqlite3.h"
 #include "sync.h"
@@ -14,11 +15,14 @@ package driver
 #include "engine.h"
 #include "driver.h"
 #include "open.h"
+#include "transport.h"
+static int goDriverTransportError(murmur_driver_t *d,char *out,size_t cap){return d->quic ? murmur_last_error(d->quic,out,cap) : 0;}
 */
 import "C"
 
 import (
 	"fmt"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 	"unsafe"
 )
 
@@ -90,6 +94,11 @@ func SetSetting(db unsafe.Pointer, name, value string) error {
 	return nil
 }
 
+// Native pull batches contain locally authored cells, matching the receiver
+// check that binds cell sites to the authenticated sender. Configure direct
+// peer connectivity for every origin that must synchronize. Native-only signed
+// journals and file metadata are valid transport schemas without raw user CRRs.
+//
 // Node is one native replication node: an engine plus a driver over
 // a borrowed SQLite connection. The connection must outlive the Node.
 type Node struct {
@@ -225,8 +234,35 @@ func (n *Node) AddSeed(addr string) error {
 func Commit(canon string) error {
 	c := C.CString(canon)
 	defer C.free(unsafe.Pointer(c))
-	if rc := C.nvCommitDb(c); rc != 0 {
+	if rc := C.nvFlushDb(c); rc != 0 {
 		return fmt.Errorf("commit %s: rc=%d", canon, int(rc))
 	}
 	return nil
+}
+
+// RemovePeer excludes a node durably and closes its active native sessions.
+// Call under SQL admission, outside an explicit transaction.
+func (n *Node) RemovePeer(db *sqlite.Conn, node [16]byte) error {
+	statement, err := db.Prepare("INSERT OR IGNORE INTO murmur_excluded(node) VALUES(?)")
+	if err != nil {
+		return err
+	}
+	if err = statement.BindBlob(1, node[:]); err == nil {
+		_, err = statement.Step()
+	}
+	statement.Close()
+	if err != nil {
+		return err
+	}
+	var id C.murmur_node_t
+	C.memcpy(unsafe.Pointer(&id.b[0]), unsafe.Pointer(&node[0]), 16)
+	C.murmur_engine_remove_node((*C.murmur_engine_t)(n.eng), &id)
+	return nil
+}
+
+// TransportError returns the native endpoint's latest diagnostic.
+func (n *Node) TransportError() string {
+	var buffer [1024]C.char
+	C.goDriverTransportError((*C.murmur_driver_t)(n.drv), &buffer[0], C.size_t(len(buffer)))
+	return C.GoString(&buffer[0])
 }

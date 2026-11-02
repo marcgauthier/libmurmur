@@ -188,6 +188,29 @@ static int node_equal(const murmur_node_t *a, const murmur_node_t *b) {
   return murmur_node_eq(a, b);
 }
 
+/* Excluded peers must never establish a session, in either direction.
+ * The murmur_excluded table is the durable source of truth. Query
+ * failures fail closed: a peer that cannot be vetted is refused. */
+static int peer_excluded(sqlite3 *db, const murmur_node_t *peer, int *sqlrc) {
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db,
+                         "SELECT 1 FROM murmur_excluded WHERE node=?1 LIMIT 1",
+                         -1, &st, NULL) != SQLITE_OK) {
+    set_sqlrc(sqlrc, sqlite3_errcode(db));
+    return 1;
+  }
+  sqlite3_bind_blob(st, 1, peer->b, 16, SQLITE_TRANSIENT);
+  int rc = sqlite3_step(st);
+  int found = (rc == SQLITE_ROW);
+  if (!found && rc != SQLITE_DONE) {
+    set_sqlrc(sqlrc, rc);
+    sqlite3_finalize(st);
+    return 1;
+  }
+  sqlite3_finalize(st);
+  return found;
+}
+
 static int key_equal(const murmur_key_t *a, const murmur_key_t *b) {
   if (a->version != b->version || a->seq != b->seq) {
     return 0;
@@ -418,6 +441,12 @@ murmur_sync_status_t murmur_serve_handshake(
       set_sqlrc(sqlrc, SQLITE_OK);
       return MURMUR_SYNC_AUTH;
     }
+    if (peer_excluded(db, peer, sqlrc)) {
+      murmur_serve_msg_free(&got);
+      set_detail(detail_out, "peer excluded");
+      set_sqlrc(sqlrc, SQLITE_AUTH);
+      return MURMUR_SYNC_AUTH;
+    }
     if (memcmp(got.msg.schema, schema, 32) != 0) {
       /* Go Handshake: schemas are a fast-fail hint only when
        * adoption is off; adopters proceed and converge through
@@ -462,6 +491,12 @@ murmur_sync_status_t murmur_serve_handshake(
     murmur_serve_msg_free(&got);
     set_detail(detail_out, "session group or identity mismatch");
     set_sqlrc(sqlrc, SQLITE_OK);
+    return MURMUR_SYNC_AUTH;
+  }
+  if (peer_excluded(db, peer, sqlrc)) {
+    murmur_serve_msg_free(&got);
+    set_detail(detail_out, "peer excluded");
+    set_sqlrc(sqlrc, SQLITE_AUTH);
     return MURMUR_SYNC_AUTH;
   }
   if (memcmp(got.msg.schema, schema, 32) != 0) {

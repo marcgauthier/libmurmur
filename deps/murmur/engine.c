@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cellsign.h"
 #include "config.h"
 #include "framing.h"
 #include "kv.h"
@@ -1552,6 +1553,43 @@ murmur_sync_status_t murmur_engine_start(murmur_engine_t *e, char **detail_out,
     }
     return s;
   }
+  /* Origin signing key: a configured origin_key_file must load
+   * exactly 32 raw seed bytes, attached to the connection and
+   * wiped from the stack. Unloadable means Start fails loud;
+   * empty means no local signing (verify/forward only). */
+  {
+    char *key_path = NULL;
+    s = murmur_cfg_setting(db, "origin_key_file", &key_path, sqlrc);
+    if (s != MURMUR_SYNC_OK) {
+      return s;
+    }
+    if (key_path[0] != '\0') {
+      uint8_t seed[32];
+      memset(seed, 0, sizeof(seed));
+      FILE *kf = fopen(key_path, "rb");
+      size_t got = kf ? fread(seed, 1, sizeof(seed), kf) : 0;
+      int tail = kf ? fgetc(kf) : EOF;
+      if (kf) {
+        fclose(kf);
+      }
+      int ok = kf && got == sizeof(seed) && tail == EOF &&
+               murmur_cellsign_attach(db, seed) == SQLITE_OK;
+      volatile uint8_t *w = seed;
+      for (size_t i = 0; i < sizeof(seed); i++) {
+        w[i] = 0;
+      }
+      if (!ok) {
+        free(key_path);
+        if (detail_out) {
+          *detail_out =
+              strdup("origin_key_file must hold exactly 32 seed bytes");
+        }
+        set_sqlrc(sqlrc, SQLITE_AUTH);
+        return MURMUR_SYNC_AUTH;
+      }
+    }
+    free(key_path);
+  }
   char *group_raw = NULL;
   s = murmur_cfg_setting(db, "group_id", &group_raw, sqlrc);
   if (s != MURMUR_SYNC_OK) {
@@ -1637,6 +1675,31 @@ murmur_sync_status_t murmur_engine_start(murmur_engine_t *e, char **detail_out,
   murmur_mship_free(e->mship);
   e->mship = mship;
   pthread_mutex_unlock(&e->mship_mu);
+  /* Reload persisted exclusions: removal must survive restart, or a
+   * removed peer rejoins on the next boot. Malformed rows are
+   * skipped; a prepare failure fails Start closed. */
+  {
+    sqlite3_stmt *ex = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT node FROM murmur_excluded", -1, &ex,
+                           NULL) != SQLITE_OK) {
+      return sqlite_fail(sqlrc, sqlite3_errcode(db));
+    }
+    pthread_mutex_lock(&e->mship_mu);
+    int step_rc = SQLITE_OK;
+    while ((step_rc = sqlite3_step(ex)) == SQLITE_ROW) {
+      const void *blob = sqlite3_column_blob(ex, 0);
+      if (blob && sqlite3_column_bytes(ex, 0) == 16) {
+        murmur_node_t xid;
+        memcpy(xid.b, blob, 16);
+        murmur_mship_remove_node(mship, &xid);
+      }
+    }
+    pthread_mutex_unlock(&e->mship_mu);
+    sqlite3_finalize(ex);
+    if (step_rc != SQLITE_DONE) {
+      return sqlite_fail(sqlrc, step_rc);
+    }
+  }
   pthread_mutex_lock(&e->mu);
   e->group = gid;
   e->node = node;
@@ -1719,6 +1782,7 @@ murmur_sync_status_t murmur_engine_stop(murmur_engine_t *e, int *sqlrc) {
     }
   }
   free(conns);
+  murmur_cellsign_detach(e->db);
   /* the driver owns the transport handle and closes it */
   return ok_rc(sqlrc);
 }

@@ -96,7 +96,7 @@ typedef struct {
   uint64_t sequence; /* schema-ack */
 } murmur_msg_t;
 
-/* Decoded CRSB change cell. Table/cid/pk/blob/site borrow the input. */
+/* Decoded CRSB change cell. Table/cid/pk/blob/site/sig borrow the input. */
 typedef struct {
   const uint8_t *table;
   size_t table_len;
@@ -115,6 +115,8 @@ typedef struct {
   size_t site_len;
   int64_t cl;
   int64_t seq;
+  const uint8_t *sig; /* v2 only: 64-byte origin signature, else NULL/0 */
+  size_t sig_len;
 } murmur_cell_t;
 
 size_t murmur_key_encode(const murmur_key_t *k, uint8_t *out, size_t cap);
@@ -142,6 +144,18 @@ size_t murmur_cells_encode(const murmur_cell_t *cells, size_t n,
 /* Encodes one cell record (Export's per-row budget accounting). */
 size_t murmur_cell_encode(const murmur_cell_t *c, uint8_t *out,
                           size_t cap);
+/* v2 variants: version 2 with a 64-byte origin signature field per
+ * cell. v2 single encode requires sig_len == 64. */
+size_t murmur_cells_encode_v2(const murmur_cell_t *cells, size_t n,
+                              uint8_t *out, size_t cap);
+size_t murmur_cell_encode_v2(const murmur_cell_t *c, uint8_t *out,
+                             size_t cap);
+/* Canonical signature bytes for one cell: domain separator plus the
+ * immutable identity/content fields (table, pk, cid, value,
+ * col_version, site). Positional fields (db_version, cl, seq) are
+ * excluded: they change at every hop. */
+size_t murmur_cell_canonical(const murmur_cell_t *c, uint8_t *out,
+                             size_t cap);
 murmur_mship_status_t murmur_cells_decode(const uint8_t *buf, size_t len,
                                           murmur_cell_t *out, size_t cap,
                                           size_t *n);

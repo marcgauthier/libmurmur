@@ -25,6 +25,14 @@
 #include "deps/murmur/causal.h"
 #include "deps/murmur/managed_origin.h"
 #include "deps/murmur/managed_schema.h"
+#include "deps/murmur/bridge_codec.h"
+#include "deps/murmur/bridge_store.h"
+#include "deps/murmur/bridge_publish.h"
+#include "deps/murmur/bridge_ferry.h"
+#include "deps/murmur/bridge_sender.h"
+#include "deps/murmur/bridge_rows.h"
+#include "deps/murmur/bridge_capture.h"
+#include "deps/murmur/bridge_peer.h"
 
 #define MURMUR_VERSION_MAJOR 0
 #define MURMUR_VERSION_MINOR 1

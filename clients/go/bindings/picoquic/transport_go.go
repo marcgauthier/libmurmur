@@ -102,10 +102,11 @@ func freeDerVecs(ptrs **C.uint8_t, lens *C.size_t, n int) {
 
 // Create binds a native endpoint. chainDER is the leaf-first chain,
 // keyPEM the private key PEM (PKCS8 for EC), caDER the trust anchors,
-// self the local node id. allowed empty = all peers; cidrs empty = all
-// networks. sessions<=0 defaults to 32.
+// crlDER the optional revocation list (DER or PEM bytes; nil/empty
+// disables revocation), self the local node id. allowed empty = all
+// peers; cidrs empty = all networks. sessions<=0 defaults to 32.
 func Create(bind string, chainDER [][]byte, keyPEM []byte, caDER [][]byte,
-	self [16]byte, allowed [][16]byte, cidrs []string, sessions int) (*Endpoint, error) {
+	crlDER []byte, self [16]byte, allowed [][16]byte, cidrs []string, sessions int) (*Endpoint, error) {
 	host, portStr, err := net.SplitHostPort(bind)
 	if err != nil {
 		return nil, err
@@ -147,11 +148,17 @@ func Create(bind string, chainDER [][]byte, keyPEM []byte, caDER [][]byte,
 	var cSelf C.murmur_node_t
 	*(*[16]byte)(unsafe.Pointer(&cSelf.b)) = self
 
+	var cCRL *C.uint8_t
+	if len(crlDER) > 0 {
+		cCRL = (*C.uint8_t)(C.CBytes(crlDER))
+		defer C.free(unsafe.Pointer(cCRL))
+	}
 	var q *C.murmur_quic_t
 	rc := C.murmur_quic_create(&q, cHost, C.uint16_t(port),
 		cChain, cChainLens, C.size_t(len(chainDER)),
 		(*C.uint8_t)(cKey), C.size_t(len(keyPEM)),
 		cCA, cCALens, C.size_t(len(caDER)),
+		cCRL, C.size_t(len(crlDER)),
 		&cSelf, cAllowed, C.size_t(len(allowed)),
 		cCIDRs, C.size_t(len(cidrs)), 0, C.uint32_t(sessions))
 	if err := check(rc, q); err != nil {

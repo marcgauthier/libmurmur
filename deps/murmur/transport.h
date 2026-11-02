@@ -55,10 +55,13 @@ typedef struct murmur_stream murmur_stream_t;   /* one bidi stream */
 /* chain_der/ca_der: DER certs (leaf first for chain). key_pem: PEM bytes
  * ("PRIVATE KEY" PKCS8 for EC/RSA, or "RSA PRIVATE KEY"); EC keys must
  * be PKCS8, never SEC1. Go converts on the cold path. */
+/* crl_der/crl_len: optional revocation list (DER or PEM bytes);
+ * NULL/0 disables revocation. Unparseable bytes fail create. */
 int murmur_quic_create(murmur_quic_t** out, const char* bind_ip,
     uint16_t bind_port, const uint8_t** chain_der, const size_t* chain_lens,
     size_t chain_n, const uint8_t* key_pem, size_t key_len,
     const uint8_t** ca_der, const size_t* ca_lens, size_t ca_n,
+    const uint8_t* crl_der, size_t crl_len,
     const murmur_node_t* self, const murmur_node_t* allowed, size_t n_allowed,
     const char** allow_cidrs, size_t n_cidrs, uint32_t max_conns,
     uint32_t sessions);
@@ -68,6 +71,7 @@ int murmur_quic_create_alpn(murmur_quic_t** out, const char* bind_ip,
     uint16_t bind_port, const uint8_t** chain_der, const size_t* chain_lens,
     size_t chain_n, const uint8_t* key_pem, size_t key_len,
     const uint8_t** ca_der, const size_t* ca_lens, size_t ca_n,
+    const uint8_t* crl_der, size_t crl_len,
     const murmur_node_t* self, const murmur_node_t* allowed, size_t n_allowed,
     const char** allow_cidrs, size_t n_cidrs, uint32_t max_conns,
     uint32_t sessions, const char* alpn);

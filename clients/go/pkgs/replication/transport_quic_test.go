@@ -40,7 +40,7 @@ func makeQuicPKI(t *testing.T) *quicPKI {
 		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -402,5 +402,106 @@ func TestPeerIDGates(t *testing.T) {
 	}
 	if _, err := peerID(chain, loopback, map[NodeID]bool{id: true}, nil); err != nil {
 		t.Fatalf("allowed node: %v", err)
+	}
+}
+
+// TestQuicRevokedLeafRefused proves the crl_file revocation path: a
+// dialer with a CRL revoking the peer's serial fails the handshake,
+// while the same dial without a CRL succeeds.
+func TestQuicRevokedLeafRefused(t *testing.T) {
+	pki := makeQuicPKI(t)
+	aHex, bHex := strings.Repeat("11", 16), strings.Repeat("22", 16)
+	aCert, aKey, _ := pki.leaf(t, "a", []string{nodeURI(aHex)})
+	bCert, bKey, bDER := pki.leaf(t, "b", []string{nodeURI(bHex)})
+	aNode, _ := ParseID(aHex)
+	bNode, _ := ParseID(bHex)
+	bLeaf, err := x509.ParseCertificate(bDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mintCRL := func(t *testing.T, name string, serials []*big.Int, nextUpdate time.Time, ca *x509.Certificate, key *ecdsa.PrivateKey) string {
+		t.Helper()
+		var revoked []pkix.RevokedCertificate
+		for _, s := range serials {
+			revoked = append(revoked, pkix.RevokedCertificate{SerialNumber: s, RevocationTime: time.Now()})
+		}
+		der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			Number: big.NewInt(1), ThisUpdate: nextUpdate.Add(-time.Hour),
+			NextUpdate: nextUpdate, RevokedCertificates: revoked,
+		}, ca, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(pki.dir, name)
+		if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	crlPath := mintCRL(t, "revoke-b.crl", []*big.Int{bLeaf.SerialNumber}, time.Now().Add(time.Hour), pki.ca, pki.caKey)
+
+	bDB := quicDB(t, "127.0.0.1:0", bCert, bKey, pki.caPath, nil)
+	b, err := ListenQuic(bDB, bNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	go func() {
+		for {
+			sess, err := b.Accept()
+			if err != nil {
+				return
+			}
+			sess.Close()
+		}
+	}()
+
+	// Control: no CRL, the dial succeeds.
+	aDB := quicDB(t, "127.0.0.1:0", aCert, aKey, pki.caPath, nil)
+	a, err := ListenQuic(aDB, aNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	sess, err := a.Dial(b.LocalAddr())
+	if err != nil {
+		t.Fatalf("clean dial: %v", err)
+	}
+	sess.Close()
+
+	// With b revoked, the same dial fails the handshake.
+	aRevDB := quicDB(t, "127.0.0.1:0", aCert, aKey, pki.caPath, map[string]string{"crl_file": crlPath})
+	aRev, err := ListenQuic(aRevDB, aNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aRev.Close()
+	if _, err := aRev.Dial(b.LocalAddr()); err == nil {
+		t.Fatal("expected revoked-leaf dial to fail")
+	}
+
+	// A CRL signed by another CA fails closed at load.
+	rogue := makeQuicPKI(t)
+	badPath := mintCRL(t, "rogue.crl", []*big.Int{bLeaf.SerialNumber}, time.Now().Add(time.Hour), rogue.ca, rogue.caKey)
+	badDB := quicDB(t, "127.0.0.1:0", aCert, aKey, pki.caPath, map[string]string{"crl_file": badPath})
+	if _, err := ListenQuic(badDB, aNode); err == nil {
+		t.Fatal("expected foreign-signed CRL to fail load")
+	}
+
+	// A stale CRL fails closed at load.
+	stalePath := mintCRL(t, "stale.crl", nil, time.Now().Add(-time.Hour), pki.ca, pki.caKey)
+	staleDB := quicDB(t, "127.0.0.1:0", aCert, aKey, pki.caPath, map[string]string{"crl_file": stalePath})
+	if _, err := ListenQuic(staleDB, aNode); err == nil {
+		t.Fatal("expected stale CRL to fail load")
+	}
+
+	// Garbage bytes fail closed at load.
+	garbagePath := filepath.Join(pki.dir, "garbage.crl")
+	if err := os.WriteFile(garbagePath, []byte("not a crl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	garbageDB := quicDB(t, "127.0.0.1:0", aCert, aKey, pki.caPath, map[string]string{"crl_file": garbagePath})
+	if _, err := ListenQuic(garbageDB, aNode); err == nil {
+		t.Fatal("expected garbage CRL to fail load")
 	}
 }

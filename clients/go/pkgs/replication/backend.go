@@ -8,6 +8,8 @@ package replication
 
 import (
 	"bytes"
+	"errors"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/bridge"
 
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 	"github.com/marcgauthier/libmurmur/clients/go/pkgs/tx"
@@ -52,6 +54,9 @@ type CrrBackend struct {
 	group  NodeID
 	node   NodeID
 	online bool
+	// Signer signs local cells on export; nil leaves export
+	// unsigned (legacy mode, or Auth failure under enforcement).
+	Signer *CellSigner
 }
 
 // NewBackend builds an online backend.
@@ -171,14 +176,34 @@ func (b *CrrBackend) Commit(records []tx.Record) error {
 	return txErr(kvCommit(b.db, records))
 }
 
-// ImportBridge is a WP-B stub (high/low ownership import).
-func (b *CrrBackend) ImportBridge(_ tx.BridgeHeader, _ []byte) (bool, error) {
-	return false, nil
+// ImportBridge authenticates/stages an immutable native bundle, then imports
+// the next contiguous typed transaction. Call outside a SQL transaction on an
+// exclusively borrowed connection with the registered bridge/capture profile.
+func (b *CrrBackend) ImportBridge(h tx.BridgeHeader, payload []byte) (bool, error) {
+	sqlite.LockWriter()
+	defer sqlite.UnlockWriter()
+	capacity := h.StagingBytes
+	if capacity == 0 {
+		capacity = bridge.DefaultStaging
+	}
+	if err := bridge.Stage(b.db, payload, [16]byte(h.Database), h.Stream, h.Signer, h.Receiver, capacity); err != nil {
+		return false, txErr(err)
+	}
+	err := bridge.ApplyRows(b.db, [16]byte(h.Database), h.Stream, h.Signer, h.Receiver)
+	var native *bridge.Error
+	if errors.As(err, &native) && native.Code == 12 {
+		return false, nil
+	}
+	return err == nil, txErr(err)
 }
 
-// ReleaseOwnership is a WP-B stub (high/low ownership release).
-func (b *CrrBackend) ReleaseOwnership(_ string, _ []byte, _ *string) (bool, error) {
-	return false, nil
+// ReleaseOwnership uses native typed-key decoding, ownership projection and
+// the configured High logical clock. An inactive claim is an idempotent no-op.
+func (b *CrrBackend) ReleaseOwnership(table string, key []byte, column *string) (bool, error) {
+	sqlite.LockWriter()
+	defer sqlite.UnlockWriter()
+	released, err := bridge.ReleaseOwnershipEncoded(b.db, table, key, column)
+	return released, txErr(err)
 }
 
 // Publish commits control records durably.
@@ -323,7 +348,7 @@ func (b *CrrBackend) exportFull() ([]byte, error) {
 	total := 0
 	cursor := Cursor{}
 	for {
-		batch, err := Export(b.db, cursor, p.batchBytes, p.maxBatchBytes)
+		batch, err := Export(b.db, cursor, p.batchBytes, p.maxBatchBytes, b.Signer)
 		if err != nil {
 			return nil, err
 		}

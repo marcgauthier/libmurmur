@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"strings"
 	"testing"
@@ -44,7 +45,7 @@ func TestExportRoundTrip(t *testing.T) {
 	if err != nil || current <= 0 {
 		t.Fatalf("dbversion = %d,%v", current, err)
 	}
-	out, err := Export(db, Cursor{}, 1<<20, 1<<20)
+	out, err := Export(db, Cursor{}, 1<<20, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestExportRoundTrip(t *testing.T) {
 		}
 	}
 	// Export again from the done cursor: empty batch, advanced from.
-	out2, err := Export(db, out.Next, 1<<20, 1<<20)
+	out2, err := Export(db, out.Next, 1<<20, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestExportPaginates(t *testing.T) {
 	if err := db.Exec("INSERT INTO t VALUES(1,'x'),(2,'y'),(3,'z'),(4,'a'),(5,'b'),(6,'c'),(7,'d'),(8,'e'),(9,'f'),(10,'g'),(11,'h'),(12,'i');"); err != nil {
 		t.Fatal(err)
 	}
-	full, err := Export(db, Cursor{}, 1<<20, 1<<20)
+	full, err := Export(db, Cursor{}, 1<<20, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestExportPaginates(t *testing.T) {
 		if rounds > 20 {
 			t.Fatal("no convergence")
 		}
-		part, err := Export(db, cursor, 300, 1<<20)
+		part, err := Export(db, cursor, 300, 1<<20, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +145,7 @@ func TestExportValidation(t *testing.T) {
 	}
 	current, _ := DbVersion(db)
 	neg := Cursor{From: -1}
-	if _, err := Export(db, neg, 1<<20, 1<<20); errKind(err) != "Protocol" {
+	if _, err := Export(db, neg, 1<<20, 1<<20, nil); errKind(err) != "Protocol" {
 		t.Fatalf("negative from err = %v", err)
 	}
 	through := current - 1
@@ -152,21 +153,21 @@ func TestExportValidation(t *testing.T) {
 		through = 0
 	}
 	below := Cursor{From: current, Through: &through}
-	if _, err := Export(db, below, 1<<20, 1<<20); errKind(err) != "Protocol" {
+	if _, err := Export(db, below, 1<<20, 1<<20, nil); errKind(err) != "Protocol" {
 		t.Fatalf("through<from err = %v", err)
 	}
 	after := &Key{Version: current, Seq: 1, Table: "t", PK: []byte{1}, CID: "b"}
 	orphan := Cursor{From: 0, After: after}
-	if _, err := Export(db, orphan, 1<<20, 1<<20); errKind(err) != "Protocol" {
+	if _, err := Export(db, orphan, 1<<20, 1<<20, nil); errKind(err) != "Protocol" {
 		t.Fatalf("after-without-through err = %v", err)
 	}
 	future := Cursor{From: current + 1}
-	if _, err := Export(db, future, 1<<20, 1<<20); err == nil || !strings.Contains(err.Error(), "regressed") {
+	if _, err := Export(db, future, 1<<20, 1<<20, nil); err == nil || !strings.Contains(err.Error(), "regressed") {
 		t.Fatalf("from>current err = %v", err)
 	}
 	tt := current + 1
 	futureThrough := Cursor{From: 0, Through: &tt}
-	if _, err := Export(db, futureThrough, 1<<20, 1<<20); err == nil || !strings.Contains(err.Error(), "regressed") {
+	if _, err := Export(db, futureThrough, 1<<20, 1<<20, nil); err == nil || !strings.Contains(err.Error(), "regressed") {
 		t.Fatalf("through>current err = %v", err)
 	}
 }
@@ -181,7 +182,7 @@ func TestExportOptOut(t *testing.T) {
 	if err := SetSetting(db, "table_replication", `{"t":false}`); err != nil {
 		t.Fatal(err)
 	}
-	out, err := Export(db, Cursor{}, 1<<20, 1<<20)
+	out, err := Export(db, Cursor{}, 1<<20, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestExportOverloaded(t *testing.T) {
 	if err := db.Exec("INSERT INTO t VALUES(1,'" + big + "');"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Export(db, Cursor{}, 1<<20, 65536); errKind(err) != "Overloaded" {
+	if _, err := Export(db, Cursor{}, 1<<20, 65536, nil); errKind(err) != "Overloaded" {
 		t.Fatalf("oversize err = %v", err)
 	}
 }
@@ -227,7 +228,7 @@ func TestStageApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, err := Export(donor, Cursor{}, 1<<20, 1<<20)
+	batch, err := Export(donor, Cursor{}, 1<<20, 1<<20, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +284,78 @@ func TestStageApplyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestApplyAcceptsForwardedCells(t *testing.T) {
+	// Transitive forwarding: a site pushes all sites' information.
+	// A relay re-exports imported cells mixed with its own, and a
+	// third node applies the mixed batch.
+	source := openCRR(t)
+	makeSyncTable(t, source, "t")
+	if err := source.Exec("INSERT INTO t VALUES(1,'source');"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := Export(source, Cursor{}, 1<<20, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := openCRR(t)
+	makeSyncTable(t, relay, "t")
+	if err := IngestBlob(relay, original.Blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := relay.Exec("INSERT INTO t VALUES(2,'relay');"); err != nil {
+		t.Fatal(err)
+	}
+	forwarded, err := Export(relay, Cursor{}, 1<<20, 1<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cells, err := DecodeCells(forwarded.Blob)
+	if err != nil || len(cells) != 2 {
+		t.Fatalf("decode = %d,%v", len(cells), err)
+	}
+	sourceSite, err := SiteID(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaySite, err := SiteID(relay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawSource, sawRelay := false, false
+	for _, c := range cells {
+		if bytes.Equal(c.SiteID, sourceSite[:]) {
+			sawSource = true
+		}
+		if bytes.Equal(c.SiteID, relaySite[:]) {
+			sawRelay = true
+		}
+	}
+	if !sawSource || !sawRelay {
+		t.Fatal("forwarded batch does not mix sites")
+	}
+	db := openCRR(t)
+	makeSyncTable(t, db, "t")
+	node := mustNode(t, strings.Repeat("22", 16))
+	if err := Reset(db, node, relaySite); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageBegin(db, node, 300000); err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range splitBlob(forwarded.Blob) {
+		if err := Stage(db, node, uint32(i), c, 1<<20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest := sha256.Sum256(forwarded.Blob)
+	if err := Apply(db, node, relaySite, Cursor{}, forwarded.Next, uint64(len(forwarded.Blob)), digest); err != nil {
+		t.Fatalf("forwarded apply err = %v", err)
+	}
+	if n, err := countRows(db, "SELECT COUNT(*) FROM t"); err != nil || n != 2 {
+		t.Fatalf("forwarded rows = %d,%v", n, err)
+	}
+}
+
 func countRows(db *sqlite.Conn, query string) (int64, error) {
 	st, err := db.Prepare(query)
 	if err != nil {
@@ -308,7 +381,7 @@ func TestApplyGuards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		batch, err := Export(donor, Cursor{}, 1<<20, 1<<20)
+		batch, err := Export(donor, Cursor{}, 1<<20, 1<<20, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

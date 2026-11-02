@@ -235,7 +235,7 @@ static int mk_endpoint(creds_t *c, int which_a, murmur_quic_t **out) {
   murmur_node_t *self = which_a ? &c->node_a : &c->node_b;
   return murmur_quic_create(out, "127.0.0.1", 0,
                             (const uint8_t **)chain, lens, n, key, key_len,
-                            (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                            (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                             self, NULL, 0, NULL, 0, 0, 0);
 }
 
@@ -295,53 +295,51 @@ static void suite_args(creds_t *c) {
   CHECK(murmur_quic_create(NULL, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
                            c->n_chain_a, c->key_a, c->key_a_len,
-                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                            &c->node_a, NULL, 0, NULL, 0, 0,
                            0) == -MURMUR_QUIC_INVALID,
         "create NULL out");
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0, NULL, NULL, 0, c->key_a,
-                           c->key_a_len, (const uint8_t **)c->ca, c->ca_lens,
-                           c->n_ca, &c->node_a, NULL, 0, NULL, 0, 0,
+                           c->key_a_len, (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0, &c->node_a, NULL, 0, NULL, 0, 0,
                            0) == -MURMUR_QUIC_INVALID,
         "create empty chain");
   CHECK(q == NULL, "failed create leaves NULL");
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
                            c->n_chain_a, NULL, 0, (const uint8_t **)c->ca,
-                           c->ca_lens, c->n_ca, &c->node_a, NULL, 0, NULL, 0,
+                           c->ca_lens, c->n_ca, NULL, 0, &c->node_a, NULL, 0, NULL, 0,
                            0, 0) == -MURMUR_QUIC_INVALID,
         "create NULL key");
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
-                           c->n_chain_a, c->key_a, c->key_a_len, NULL, NULL,
-                           0, &c->node_a, NULL, 0, NULL, 0, 0,
+                           c->n_chain_a, c->key_a, c->key_a_len, NULL, NULL, 0, NULL, 0, &c->node_a, NULL, 0, NULL, 0, 0,
                            0) == -MURMUR_QUIC_INVALID,
         "create empty CA");
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
                            c->n_chain_a, c->key_a, c->key_a_len,
-                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL,
+                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0, NULL,
                            NULL, 0, NULL, 0, 0, 0) == -MURMUR_QUIC_INVALID,
         "create NULL self");
   const char *bad_cidr[] = {"not-a-cidr"};
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
                            c->n_chain_a, c->key_a, c->key_a_len,
-                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                            &c->node_a, NULL, 0, bad_cidr, 1, 0,
                            0) == -MURMUR_QUIC_INVALID,
         "create bad CIDR");
   CHECK(murmur_quic_create_alpn(&q, "127.0.0.1", 0,
                                 (const uint8_t **)c->chain_a, c->chain_a_lens,
                                 c->n_chain_a, c->key_a, c->key_a_len,
-                                (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                                (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                                 &c->node_a, NULL, 0, NULL, 0, 0, 0,
                                 NULL) == -MURMUR_QUIC_INVALID,
         "create NULL ALPN");
   CHECK(murmur_quic_create_alpn(&q, "127.0.0.1", 0,
                                 (const uint8_t **)c->chain_a, c->chain_a_lens,
                                 c->n_chain_a, c->key_a, c->key_a_len,
-                                (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                                (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                                 &c->node_a, NULL, 0, NULL, 0, 0, 0,
                                 "") == -MURMUR_QUIC_INVALID,
         "create empty ALPN");
@@ -349,10 +347,23 @@ static void suite_args(creds_t *c) {
   CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
                            (const uint8_t **)c->chain_a, c->chain_a_lens,
                            c->n_chain_a, c->key_a, c->key_a_len,
-                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                           (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0,
                            &c->node_b, NULL, 0, NULL, 0, 0,
                            0) == -MURMUR_QUIC_AUTH,
         "create self mismatch");
+  /* Unparseable CRL bytes fail create closed. */
+  {
+    static const uint8_t garbage[] = "not a crl";
+    q = NULL;
+    CHECK(murmur_quic_create(&q, "127.0.0.1", 0,
+                             (const uint8_t **)c->chain_a, c->chain_a_lens,
+                             c->n_chain_a, c->key_a, c->key_a_len,
+                             (const uint8_t **)c->ca, c->ca_lens, c->n_ca,
+                             garbage, sizeof(garbage) - 1, &c->node_a, NULL, 0,
+                             NULL, 0, 0, 0) == -MURMUR_QUIC_INVALID,
+          "create garbage CRL accepted");
+    CHECK(q == NULL, "garbage CRL leaves NULL");
+  }
   /* NULL-handle calls fail closed (or are safe no-ops). */
   char buf[64];
   size_t n = 0;
@@ -419,8 +430,7 @@ static void suite_args(creds_t *c) {
           int rc = murmur_quic_create(
               &qb, "127.0.0.1", ntohs(ha.sin_port),
               (const uint8_t **)c->chain_b, c->chain_b_lens, c->n_chain_b,
-              c->key_b, c->key_b_len, (const uint8_t **)c->ca, c->ca_lens,
-              c->n_ca, &c->node_b, NULL, 0, NULL, 0, 0, 0);
+              c->key_b, c->key_b_len, (const uint8_t **)c->ca, c->ca_lens, c->n_ca, NULL, 0, &c->node_b, NULL, 0, NULL, 0, 0, 0);
           CHECK(rc == -MURMUR_QUIC_BUSY, "bind conflict BUSY, got %d", rc);
           murmur_quic_free(qb);
         } else {
@@ -795,7 +805,7 @@ static void suite_server_allowlist(creds_t *c) {
   int rc = murmur_quic_create(
       &qb, "127.0.0.1", 0, (const uint8_t **)c->chain_b, c->chain_b_lens,
       c->n_chain_b, c->key_b, c->key_b_len, (const uint8_t **)c->ca,
-      c->ca_lens, c->n_ca, &c->node_b, &c->node_unknown, 1, NULL, 0, 0, 0);
+      c->ca_lens, c->n_ca, NULL, 0, &c->node_b, &c->node_unknown, 1, NULL, 0, 0, 0);
   CHECK(rc == 0, "allowlist qb up");
   if (qa && qb) {
     expect_server_refusal(qa, qb, "allowlist");
@@ -810,7 +820,7 @@ static void suite_client_allowlist(creds_t *c) {
   int rc = murmur_quic_create(
       &qa, "127.0.0.1", 0, (const uint8_t **)c->chain_a, c->chain_a_lens,
       c->n_chain_a, c->key_a, c->key_a_len, (const uint8_t **)c->ca,
-      c->ca_lens, c->n_ca, &c->node_a, &c->node_unknown, 1, NULL, 0, 0, 0);
+      c->ca_lens, c->n_ca, NULL, 0, &c->node_a, &c->node_unknown, 1, NULL, 0, 0, 0);
   CHECK(rc == 0, "dialer-gate qa up");
   CHECK(mk_endpoint(c, 0, &qb) == 0, "dialer-gate qb up");
   if (qa && qb) {
@@ -850,7 +860,7 @@ static void suite_cidr_deny(creds_t *c) {
   int rc = murmur_quic_create(
       &qb, "127.0.0.1", 0, (const uint8_t **)c->chain_b, c->chain_b_lens,
       c->n_chain_b, c->key_b, c->key_b_len, (const uint8_t **)c->ca,
-      c->ca_lens, c->n_ca, &c->node_b, NULL, 0, deny, 1, 0, 0);
+      c->ca_lens, c->n_ca, NULL, 0, &c->node_b, NULL, 0, deny, 1, 0, 0);
   CHECK(rc == 0, "cidr qb up");
   if (qa && qb) {
     expect_server_refusal(qa, qb, "cidr");
@@ -867,7 +877,7 @@ static void suite_cidr_allow(creds_t *c) {
   int rc = murmur_quic_create(
       &qb, "127.0.0.1", 0, (const uint8_t **)c->chain_b, c->chain_b_lens,
       c->n_chain_b, c->key_b, c->key_b_len, (const uint8_t **)c->ca,
-      c->ca_lens, c->n_ca, &c->node_b, NULL, 0, allow, 1, 0, 0);
+      c->ca_lens, c->n_ca, NULL, 0, &c->node_b, NULL, 0, allow, 1, 0, 0);
   CHECK(rc == 0, "cidr-allow qb up");
   if (qa && qb) {
     murmur_session_t *sa = NULL, *sb = NULL;
@@ -892,7 +902,7 @@ static void suite_alpn_mismatch(creds_t *c) {
   int rc = murmur_quic_create_alpn(
       &qb, "127.0.0.1", 0, (const uint8_t **)c->chain_b, c->chain_b_lens,
       c->n_chain_b, c->key_b, c->key_b_len, (const uint8_t **)c->ca,
-      c->ca_lens, c->n_ca, &c->node_b, NULL, 0, NULL, 0, 0, 0,
+      c->ca_lens, c->n_ca, NULL, 0, &c->node_b, NULL, 0, NULL, 0, 0, 0,
       "murmur-sqlite/files/1");
   CHECK(rc == 0, "alpn qb up");
   if (qa && qb) {

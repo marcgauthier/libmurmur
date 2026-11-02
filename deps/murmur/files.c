@@ -17,6 +17,7 @@
 #include "aesgcm.h"
 #include "hkdf.h"
 #include "kv.h"
+extern int nvFlushDb(const char *);
 #include "postcard.h"
 #include "schema.h"
 #include "sha256.h"
@@ -647,7 +648,7 @@ static murmur_files_status_t sql_fail(int rc, char **detail_out,
 
 /* Upserts one metadata blob into the replicated table
  * (tombstones included; the row is never SQL-deleted). */
-static murmur_files_status_t meta_put(murmur_files_t *o,
+static murmur_files_status_t meta_put_inner(murmur_files_t *o,
                                       const murmur_files_meta_t *m,
                                       char **detail_out, int *sqlrc) {
   uint8_t *wire = NULL;
@@ -678,9 +679,16 @@ static murmur_files_status_t meta_put(murmur_files_t *o,
   }
   return MURMUR_FILES_OK;
 }
+static murmur_files_status_t meta_put(murmur_files_t *o,const murmur_files_meta_t *m,char **detail_out,int *sqlrc) {
+  murmur_db_writer_lock();
+  murmur_files_status_t fs=meta_put_inner(o,m,detail_out,sqlrc);
+  murmur_db_writer_unlock();
+  return fs;
+}
+
 
 /* Reads one metadata blob; *found false when absent. */
-static murmur_files_status_t meta_get(murmur_files_t *o, const char *name,
+static murmur_files_status_t meta_get_inner(murmur_files_t *o, const char *name,
                                       murmur_files_meta_t *out, int *found,
                                       char **detail_out, int *sqlrc) {
   *found = 0;
@@ -717,9 +725,16 @@ static murmur_files_status_t meta_get(murmur_files_t *o, const char *name,
   }
   return MURMUR_FILES_OK;
 }
+static murmur_files_status_t meta_get(murmur_files_t *o,const char *name,murmur_files_meta_t *out,int *found,char **detail_out,int *sqlrc) {
+  murmur_db_writer_lock();
+  murmur_files_status_t fs=meta_get_inner(o,name,out,found,detail_out,sqlrc);
+  murmur_db_writer_unlock();
+  return fs;
+}
+
 
 /* All metadata rows in name order. */
-static murmur_files_status_t meta_scan_all(murmur_files_t *o,
+static murmur_files_status_t meta_scan_all_inner(murmur_files_t *o,
                                            murmur_files_meta_t **out, size_t *n,
                                            char **detail_out, int *sqlrc) {
   *out = NULL;
@@ -775,6 +790,13 @@ static murmur_files_status_t meta_scan_all(murmur_files_t *o,
   }
   return MURMUR_FILES_OK;
 }
+static murmur_files_status_t meta_scan_all(murmur_files_t *o,murmur_files_meta_t **out,size_t *n,char **detail_out,int *sqlrc) {
+  murmur_db_writer_lock();
+  murmur_files_status_t fs=meta_scan_all_inner(o,out,n,detail_out,sqlrc);
+  murmur_db_writer_unlock();
+  return fs;
+}
+
 
 /* Durable single-record kv write (availability sightings). */
 static murmur_files_status_t files_write_record(murmur_files_t *o,
@@ -801,7 +823,7 @@ static murmur_files_status_t files_write_record(murmur_files_t *o,
   return MURMUR_FILES_OK;
 }
 
-static murmur_files_status_t files_get(murmur_files_t *o, const uint8_t *key,
+static murmur_files_status_t files_get_inner(murmur_files_t *o, const uint8_t *key,
                                        size_t key_len, uint8_t **val,
                                        size_t *val_len, int *found,
                                        char **detail_out, int *sqlrc) {
@@ -816,6 +838,13 @@ static murmur_files_status_t files_get(murmur_files_t *o, const uint8_t *key,
   }
   return MURMUR_FILES_OK;
 }
+static murmur_files_status_t files_get(murmur_files_t *o,const uint8_t *key,size_t key_len,uint8_t **val,size_t *val_len,int *found,char **detail_out,int *sqlrc) {
+  murmur_db_writer_lock();
+  murmur_files_status_t fs=files_get_inner(o,key,key_len,val,val_len,found,detail_out,sqlrc);
+  murmur_db_writer_unlock();
+  return fs;
+}
+
 
 /* ---------- open / close ---------- */
 
@@ -1441,7 +1470,8 @@ murmur_files_status_t murmur_files_upload_append(murmur_file_upload_t *u,
 static murmur_files_status_t upload_finish(murmur_files_t *o,
                                            murmur_file_upload_t *u,
                                            murmur_files_meta_t *meta_out,
-                                           char **detail_out, int *sqlrc) {
+                                           char **detail_out, int *sqlrc,
+ murmur_files_commit_fn commit,void *commit_ctx) {
   murmur_files_status_t fs = upload_flush(u, detail_out);
   uint8_t digest[32];
   uint8_t *terminal = NULL;
@@ -1516,7 +1546,27 @@ static murmur_files_status_t upload_finish(murmur_files_t *o,
     meta.generation = u->generation;
     meta.millis = files_now_ms();
     meta.node = o->self;
-    fs = meta_put(o, &meta, detail_out, sqlrc);
+    murmur_db_writer_lock();
+    int rc=SQLITE_OK;
+    int began=0;
+    if(commit) {
+      rc=sqlite3_get_autocommit(o->db) ? sqlite3_exec(o->db,"BEGIN IMMEDIATE",NULL,NULL,NULL) : SQLITE_MISUSE;
+      began=rc==SQLITE_OK;
+      if(rc==SQLITE_OK) rc=commit(o->db,&meta,commit_ctx);
+    }
+    fs=rc==SQLITE_OK ? meta_put(o,&meta,detail_out,sqlrc) : sql_fail(rc,detail_out,sqlrc);
+    if(began) {
+      if(fs==MURMUR_FILES_OK) {
+        rc=sqlite3_exec(o->db,"COMMIT",NULL,NULL,NULL);
+        if(rc!=SQLITE_OK) fs=sql_fail(rc,detail_out,sqlrc);
+      }
+      if(!sqlite3_get_autocommit(o->db)) sqlite3_exec(o->db,"ROLLBACK",NULL,NULL,NULL);
+      if(fs==MURMUR_FILES_OK) {
+        const char *path=sqlite3_db_filename(o->db,"main");
+        if(path && *path && nvFlushDb(path)) fs=sql_fail(SQLITE_IOERR_FSYNC,detail_out,sqlrc);
+      }
+    }
+    murmur_db_writer_unlock();
     if (fs == MURMUR_FILES_OK && meta_out) {
       memset(meta_out, 0, sizeof(*meta_out));
       meta_out->name = strdup(u->name);
@@ -1551,7 +1601,17 @@ murmur_files_status_t murmur_files_finish_upload(
     return MURMUR_FILES_INVALID;
   }
   pthread_mutex_lock(&o->gate);
-  murmur_files_status_t fs = upload_finish(o, u, meta_out, detail_out, sqlrc);
+  murmur_files_status_t fs = upload_finish(o, u, meta_out, detail_out, sqlrc, NULL, NULL);
+  pthread_mutex_unlock(&o->gate);
+  return fs;
+}
+
+murmur_files_status_t murmur_files_finish_upload_atomic(
+    murmur_files_t *o,murmur_file_upload_t *u,murmur_files_commit_fn commit,void *ctx,
+    murmur_files_meta_t *meta_out,char **detail_out,int *sqlrc) {
+  if(!o || !u || u->o!=o || !commit) return MURMUR_FILES_INVALID;
+  pthread_mutex_lock(&o->gate);
+  murmur_files_status_t fs=upload_finish(o,u,meta_out,detail_out,sqlrc,commit,ctx);
   pthread_mutex_unlock(&o->gate);
   return fs;
 }
@@ -1608,7 +1668,7 @@ static murmur_files_status_t upload_inner(murmur_files_t *o, const char *name,
     }
   }
   free(buf);
-  return upload_finish(o, u, meta_out, detail_out, sqlrc);
+  return upload_finish(o, u, meta_out, detail_out, sqlrc, NULL, NULL);
 }
 
 murmur_files_status_t murmur_files_upload_one(
@@ -1838,6 +1898,10 @@ struct murmur_file_download_t {
   int closed;
 };
 
+const murmur_files_meta_t *murmur_files_download_metadata(const murmur_file_download_t *d) {
+  return d ? &d->meta : NULL;
+}
+sqlite3 *murmur_files_database(const murmur_files_t *o) {return o ? o->db : NULL;}
 uint64_t murmur_files_download_bytes(const murmur_file_download_t *d) {
   return d->meta.bytes;
 }
@@ -2117,7 +2181,7 @@ murmur_files_status_t murmur_files_list(murmur_files_t *o,
   return MURMUR_FILES_OK;
 }
 
-murmur_files_status_t murmur_files_list_bounded(murmur_files_t *o,
+static murmur_files_status_t murmur_files_list_bounded_inner(murmur_files_t *o,
                                                 size_t max_bytes,
                                                 murmur_files_meta_t **out,
                                                 size_t *n, char **detail_out,
@@ -2223,6 +2287,13 @@ murmur_files_status_t murmur_files_list_bounded(murmur_files_t *o,
   }
   return MURMUR_FILES_OK;
 }
+murmur_files_status_t murmur_files_list_bounded(murmur_files_t *o,size_t max_bytes,murmur_files_meta_t **out,size_t *n,char **detail_out,int *sqlrc) {
+  murmur_db_writer_lock();
+  murmur_files_status_t fs=murmur_files_list_bounded_inner(o,max_bytes,out,n,detail_out,sqlrc);
+  murmur_db_writer_unlock();
+  return fs;
+}
+
 
 murmur_files_status_t murmur_files_available(murmur_files_t *o,
                                              const char *name, int *avail,

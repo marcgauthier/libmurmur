@@ -713,7 +713,7 @@ static int get_field(const uint8_t *buf, size_t len, size_t *pos,
 }
 
 static size_t put_cell(uint8_t *out, size_t cap, size_t pos,
-                       const murmur_cell_t *c) {
+                       const murmur_cell_t *c, int with_sig) {
   pos = put_field(out, cap, pos, c->table, c->table_len);
   if (pos == SHORT) return SHORT;
   pos = put_field(out, cap, pos, c->pk, c->pk_len);
@@ -757,11 +757,19 @@ static size_t put_cell(uint8_t *out, size_t cap, size_t pos,
   if (pos == SHORT) return SHORT;
   pos = put_u64le(out, cap, pos, (uint64_t)c->cl);
   if (pos == SHORT) return SHORT;
-  return put_u64le(out, cap, pos, (uint64_t)c->seq);
+  pos = put_u64le(out, cap, pos, (uint64_t)c->seq);
+  if (pos == SHORT) return SHORT;
+  if (!with_sig) {
+    return pos;
+  }
+  if (c->sig_len != 64) {
+    return SHORT;
+  }
+  return put_field(out, cap, pos, c->sig, 64);
 }
 
 static int get_cell(const uint8_t *buf, size_t len, size_t *pos,
-                    murmur_cell_t *c) {
+                    murmur_cell_t *c, int want_sig) {
   if (get_field(buf, len, pos, &c->table, &c->table_len) != 0 ||
       (c->table_len > 0 && !murmur_utf8_valid(c->table, c->table_len))) {
     return -1;
@@ -826,6 +834,15 @@ static int get_cell(const uint8_t *buf, size_t len, size_t *pos,
     return -1;
   }
   c->seq = (int64_t)w;
+  c->sig = NULL;
+  c->sig_len = 0;
+  if (!want_sig) {
+    return 0;
+  }
+  if (get_field(buf, len, pos, &c->sig, &c->sig_len) != 0 ||
+      c->sig_len != 64) {
+    return -1;
+  }
   return 0;
 }
 
@@ -834,7 +851,16 @@ size_t murmur_cell_encode(const murmur_cell_t *c, uint8_t *out,
   if (!c || !out) {
     return 0;
   }
-  size_t pos = put_cell(out, cap, 0, c);
+  size_t pos = put_cell(out, cap, 0, c, 0);
+  return pos == SHORT ? 0 : pos;
+}
+
+size_t murmur_cell_encode_v2(const murmur_cell_t *c, uint8_t *out,
+                             size_t cap) {
+  if (!c || !out) {
+    return 0;
+  }
+  size_t pos = put_cell(out, cap, 0, c, 1);
   return pos == SHORT ? 0 : pos;
 }
 
@@ -851,10 +877,79 @@ size_t murmur_cells_encode(const murmur_cell_t *cells, size_t n,
   pos = put_u32le(out, cap, pos, (uint32_t)n);
   if (pos == SHORT) return 0;
   for (size_t i = 0; i < n; i++) {
-    pos = put_cell(out, cap, pos, &cells[i]);
+    pos = put_cell(out, cap, pos, &cells[i], 0);
     if (pos == SHORT) return 0;
   }
   return pos;
+}
+
+size_t murmur_cells_encode_v2(const murmur_cell_t *cells, size_t n,
+                              uint8_t *out, size_t cap) {
+  if ((!cells && n > 0) || !out || n > 0xffffffffu) {
+    return 0;
+  }
+  size_t pos = 0;
+  pos = put_fixed(out, cap, pos, "CRSB", 4);
+  if (pos == SHORT) return 0;
+  pos = put_u32le(out, cap, pos, 2);
+  if (pos == SHORT) return 0;
+  pos = put_u32le(out, cap, pos, (uint32_t)n);
+  if (pos == SHORT) return 0;
+  for (size_t i = 0; i < n; i++) {
+    pos = put_cell(out, cap, pos, &cells[i], 1);
+    if (pos == SHORT) return 0;
+  }
+  return pos;
+}
+
+size_t murmur_cell_canonical(const murmur_cell_t *c, uint8_t *out,
+                             size_t cap) {
+  static const char kDS[] = "MURMUR-CELL-SIGv1";
+  if (!c || !out) {
+    return 0;
+  }
+  size_t pos = 0;
+  pos = put_fixed(out, cap, pos, kDS, sizeof(kDS) - 1);
+  if (pos == SHORT) return 0;
+  if (pos + 1 > cap) return 0;
+  out[pos++] = 0;
+  pos = put_field(out, cap, pos, c->table, c->table_len);
+  if (pos == SHORT) return 0;
+  pos = put_field(out, cap, pos, c->pk, c->pk_len);
+  if (pos == SHORT) return 0;
+  pos = put_field(out, cap, pos, c->cid, c->cid_len);
+  if (pos == SHORT) return 0;
+  if (pos + 1 > cap) return 0;
+  uint64_t w = 0;
+  switch (c->val_tag) {
+    case 0:
+      out[pos++] = 0;
+      break;
+    case 1:
+      out[pos++] = 1;
+      pos = put_u64le(out, cap, pos, (uint64_t)c->val_int);
+      if (pos == SHORT) return 0;
+      break;
+    case 2:
+      out[pos++] = 2;
+      memcpy(&w, &c->val_real, sizeof(w));
+      pos = put_u64le(out, cap, pos, w);
+      if (pos == SHORT) return 0;
+      break;
+    case 3:
+      out[pos++] = 3;
+      pos = put_field(out, cap, pos, c->val_blob, c->val_blob_len);
+      if (pos == SHORT) return 0;
+      break;
+    default:
+      out[pos++] = 4;
+      pos = put_field(out, cap, pos, c->val_blob, c->val_blob_len);
+      if (pos == SHORT) return 0;
+      break;
+  }
+  pos = put_u64le(out, cap, pos, (uint64_t)c->col_version);
+  if (pos == SHORT) return 0;
+  return put_field(out, cap, pos, c->site, c->site_len);
 }
 
 murmur_mship_status_t murmur_cells_decode(const uint8_t *buf, size_t len,
@@ -870,7 +965,7 @@ murmur_mship_status_t murmur_cells_decode(const uint8_t *buf, size_t len,
     return MURMUR_MSHIP_PROTOCOL;
   }
   uint32_t ver = 0;
-  if (get_u32le(buf, len, &pos, &ver) != 0 || ver != 1) {
+  if (get_u32le(buf, len, &pos, &ver) != 0 || (ver != 1 && ver != 2)) {
     return MURMUR_MSHIP_PROTOCOL;
   }
   uint32_t count = 0;
@@ -888,7 +983,7 @@ murmur_mship_status_t murmur_cells_decode(const uint8_t *buf, size_t len,
     return MURMUR_MSHIP_INVALID;
   }
   for (uint32_t i = 0; i < count; i++) {
-    if (get_cell(buf, len, &pos, &out[i]) != 0) {
+    if (get_cell(buf, len, &pos, &out[i], ver == 2) != 0) {
       return MURMUR_MSHIP_PROTOCOL;
     }
   }

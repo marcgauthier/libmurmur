@@ -117,11 +117,11 @@ func TestBackendProgressObserve(t *testing.T) {
 	if err := be.ReclaimRetention(); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := be.ImportBridge(tx.BridgeHeader{}, nil); err != nil || ok {
-		t.Fatal("bridge stub")
+	if ok, err := be.ImportBridge(tx.BridgeHeader{}, nil); err == nil || ok {
+		t.Fatal("invalid bridge policy accepted")
 	}
-	if ok, err := be.ReleaseOwnership("t", nil, nil); err != nil || ok {
-		t.Fatal("ownership stub")
+	if ok, err := be.ReleaseOwnership("t", nil, nil); err == nil || ok {
+		t.Fatal("invalid ownership key accepted")
 	}
 }
 
@@ -290,7 +290,7 @@ func TestSnapshotTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	donorBe := NewBackend(donorDB, group, donor.node)
-	manifest, err := BuildSnapshotFor(donorDB, donorBe, params, 1<<20, 1<<20, receiver.node, 1000)
+	manifest, err := BuildSnapshotFor(donorDB, donorBe, params, 1<<20, 1<<20, receiver.node, 1000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

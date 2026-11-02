@@ -7,6 +7,8 @@
 
 #include "config.h"
 #include "kv.h"
+#include "bridge_peer.h"
+#include "cellsign.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +103,10 @@ murmur_sync_status_t murmur_sync_ensure_schema(sqlite3 *db, int *sqlrc) {
     return sqlite_fail(sqlrc, SQLITE_MISUSE);
   }
   int rc = sqlite3_exec(db, kSchemaDDL, NULL, NULL, NULL);
+  if (rc != SQLITE_OK) {
+    return sqlite_fail(sqlrc, rc);
+  }
+  rc = murmur_cellsign_ensure_schema(db, NULL);
   return rc == SQLITE_OK ? ok_rc(sqlrc) : sqlite_fail(sqlrc, rc);
 }
 
@@ -320,12 +326,8 @@ murmur_sync_status_t murmur_sync_db_version(sqlite3 *db, int64_t *ver,
   return ok_rc(sqlrc);
 }
 
-murmur_sync_status_t murmur_sync_ingest_blob(sqlite3 *db,
-                                             const uint8_t *blob, size_t len,
-                                             int *sqlrc) {
-  if (!db || (!blob && len > 0)) {
-    return sqlite_fail(sqlrc, SQLITE_MISUSE);
-  }
+static murmur_sync_status_t ingest_merge(sqlite3 *db, const uint8_t *blob,
+                                          size_t len, int *sqlrc) {
   sqlite3_stmt *st = NULL;
   int rc =
       sqlite3_prepare_v2(db, "SELECT crsql_ingest_blob(?)", -1, &st, NULL);
@@ -339,7 +341,171 @@ murmur_sync_status_t murmur_sync_ingest_blob(sqlite3 *db,
     APPLY_DBG("ingest-done len=%zu", len);
     return MURMUR_SYNC_PROTOCOL;
   }
-  return rc == SQLITE_ROW ? ok_rc(sqlrc) : sqlite_fail(sqlrc, rc);
+  if(rc==SQLITE_ROW)rc=murmur_bridge_peer_apply(db);
+  return rc == SQLITE_OK ? ok_rc(sqlrc) : sqlite_fail(sqlrc, rc);
+}
+
+/* Verify a v2 batch cell by cell against trust, persist every
+ * verified signature for verbatim re-export, and re-encode v1
+ * (cr-sqlite parses v1 only). Refusals return AUTH. */
+static murmur_sync_status_t ingest_verify_v2(sqlite3 *db, const uint8_t *blob,
+                                             size_t len,
+                                             const murmur_cellsign_trust_t *trust,
+                                             uint8_t **out_v1, size_t *out_len,
+                                             int *sqlrc) {
+  uint32_t count = (uint32_t)blob[8] | ((uint32_t)blob[9] << 8) |
+                   ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
+  if ((uint64_t)count > (uint64_t)(len - 12) + 1) {
+    APPLY_DBG("sig-count len=%zu count=%u", len, count);
+    return MURMUR_SYNC_PROTOCOL;
+  }
+  murmur_cell_t *cells = NULL;
+  if (count > 0) {
+    cells = (murmur_cell_t *)malloc((size_t)count * sizeof(*cells));
+    if (!cells) {
+      return sqlite_fail(sqlrc, SQLITE_NOMEM);
+    }
+  }
+  size_t n = 0;
+  if (murmur_cells_decode(blob, len, cells, count, &n) != MURMUR_OK) {
+    APPLY_DBG("sig-decode len=%zu count=%u", len, count);
+    free(cells);
+    return MURMUR_SYNC_PROTOCOL;
+  }
+  murmur_sync_status_t status = MURMUR_SYNC_OK;
+  for (size_t i = 0; i < n; i++) {
+    murmur_cell_t *c = &cells[i];
+    if (c->site_len != 16 || c->sig_len != 64) {
+      APPLY_DBG("sig-shape i=%zu", i);
+      status = MURMUR_SYNC_PROTOCOL;
+      break;
+    }
+    const uint8_t *pub = murmur_cellsign_trust_find(trust, c->site);
+    if (!pub) {
+      APPLY_DBG("sig-unknown-site i=%zu", i);
+      set_sqlrc(sqlrc, SQLITE_AUTH);
+      status = MURMUR_SYNC_AUTH;
+      break;
+    }
+    size_t need = 128 + c->table_len + c->pk_len + c->cid_len +
+                  c->val_blob_len + c->site_len;
+    uint8_t *canon = (uint8_t *)malloc(need ? need : 1);
+    if (!canon) {
+      status = sqlite_fail(sqlrc, SQLITE_NOMEM);
+      break;
+    }
+    size_t canon_len = murmur_cell_canonical(c, canon, need);
+    int vok = canon_len > 0
+                  ? murmur_cellsign_verify(pub, canon, canon_len, c->sig)
+                  : SQLITE_AUTH;
+    memset(canon, 0, need);
+    free(canon);
+    if (vok != SQLITE_OK) {
+      APPLY_DBG("sig-bad i=%zu", i);
+      set_sqlrc(sqlrc, SQLITE_AUTH);
+      status = MURMUR_SYNC_AUTH;
+      break;
+    }
+    int src = SQLITE_OK;
+    if (murmur_cellsign_store(db, c->table, c->table_len, c->pk,
+                              c->pk_len, c->cid, c->cid_len, c->site,
+                              c->col_version, c->sig, &src) != SQLITE_OK) {
+      status = sqlite_fail(sqlrc, src);
+      break;
+    }
+  }
+  if (status == MURMUR_SYNC_OK) {
+    /* v1 is exactly v2 minus the sig fields: fits in len. */
+    uint8_t *v1 = (uint8_t *)malloc(len ? len : 1);
+    if (!v1) {
+      status = sqlite_fail(sqlrc, SQLITE_NOMEM);
+    } else {
+      size_t nenc = murmur_cells_encode(cells, n, v1, len);
+      if (nenc == 0) {
+        APPLY_DBG("sig-strip n=%zu", n);
+        free(v1);
+        status = MURMUR_SYNC_PROTOCOL;
+      } else {
+        *out_v1 = v1;
+        *out_len = nenc;
+      }
+    }
+  }
+  free(cells);
+  return status;
+}
+
+murmur_sync_status_t murmur_sync_ingest_blob(sqlite3 *db,
+                                             const uint8_t *blob, size_t len,
+                                             int *sqlrc) {
+  if (!db || (!blob && len > 0)) {
+    return sqlite_fail(sqlrc, SQLITE_MISUSE);
+  }
+  int is_v1 = len >= 12 && memcmp(blob, "CRSB", 4) == 0 && blob[4] == 1 &&
+              blob[5] == 0 && blob[6] == 0 && blob[7] == 0;
+  int is_v2 = len >= 12 && memcmp(blob, "CRSB", 4) == 0 && blob[4] == 2 &&
+              blob[5] == 0 && blob[6] == 0 && blob[7] == 0;
+  if (!is_v1 && !is_v2) {
+    /* Not our envelope: cr-sqlite validates. */
+    return ingest_merge(db, blob, len, sqlrc);
+  }
+  murmur_cellsign_trust_t trust;
+  memset(&trust, 0, sizeof(trust));
+  int trc = murmur_cellsign_trust_load(db, &trust, sqlrc);
+  if (trc != SQLITE_OK) {
+    return sqlite_fail(sqlrc, trc);
+  }
+  int enforcing = trust.n > 0;
+  if (is_v1 && enforcing) {
+    APPLY_DBG("ingest-unsigned len=%zu", len);
+    murmur_cellsign_trust_free(&trust);
+    set_sqlrc(sqlrc, SQLITE_AUTH);
+    return MURMUR_SYNC_AUTH;
+  }
+  const uint8_t *merge = blob;
+  size_t merge_len = len;
+  uint8_t *stripped = NULL;
+  size_t stripped_len = 0;
+  if (is_v2 && enforcing) {
+    murmur_sync_status_t vs = ingest_verify_v2(db, blob, len, &trust,
+                                               &stripped, &stripped_len,
+                                               sqlrc);
+    if (vs != MURMUR_SYNC_OK) {
+      murmur_cellsign_trust_free(&trust);
+      return vs;
+    }
+    merge = stripped;
+    merge_len = stripped_len;
+  } else if (is_v2) {
+    /* Legacy receiver: strip without verifying or storing. */
+    uint32_t count = (uint32_t)blob[8] | ((uint32_t)blob[9] << 8) |
+                     ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
+    murmur_cell_t *cells = NULL;
+    size_t n = 0;
+    murmur_sync_status_t vs = MURMUR_SYNC_PROTOCOL;
+    if ((uint64_t)count <= (uint64_t)(len - 12) + 1 &&
+        (count == 0 ||
+         (cells = (murmur_cell_t *)malloc((size_t)count * sizeof(*cells))) !=
+             NULL) &&
+        murmur_cells_decode(blob, len, cells, count, &n) == MURMUR_OK &&
+        (stripped = (uint8_t *)malloc(len ? len : 1)) != NULL &&
+        (stripped_len = murmur_cells_encode(cells, n, stripped, len)) != 0) {
+      merge = stripped;
+      merge_len = stripped_len;
+      vs = MURMUR_SYNC_OK;
+    }
+    free(cells);
+    if (vs != MURMUR_SYNC_OK) {
+      APPLY_DBG("ingest-strip len=%zu", len);
+      free(stripped);
+      murmur_cellsign_trust_free(&trust);
+      return vs;
+    }
+  }
+  murmur_cellsign_trust_free(&trust);
+  murmur_sync_status_t st = ingest_merge(db, merge, merge_len, sqlrc);
+  free(stripped);
+  return st;
 }
 
 /* ---- stage / progress / reset ---- */
@@ -584,6 +750,12 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
   memset(&flags, 0, sizeof(flags));
   uint8_t *blob = NULL;
   size_t blob_len = 0, blob_cap = 0;
+  murmur_cellsign_trust_t trust;
+  memset(&trust, 0, sizeof(trust));
+  int trust_loaded = 0;
+  int enforcing = 0;
+  murmur_node_t local_site;
+  memset(&local_site, 0, sizeof(local_site));
   uint8_t *last_arena = NULL;
   murmur_key_t last;
   memset(&last, 0, sizeof(last));
@@ -604,6 +776,21 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
     goto rollback;
   }
   int filtering = murmur_cfg_table_filtering(&flags);
+  {
+    int trc = murmur_cellsign_trust_load(db, &trust, &fail_rc);
+    if (trc != SQLITE_OK) {
+      status = sqlite_fail(&fail_rc, trc);
+      goto rollback;
+    }
+    trust_loaded = 1;
+    if (trust.n > 0) {
+      status = murmur_sync_site_id(db, &local_site, &fail_rc);
+      if (status != MURMUR_SYNC_OK) {
+        goto rollback;
+      }
+    }
+  }
+  enforcing = trust.n > 0;
 
   rc = sqlite3_prepare_v2(db, kExportSQL, -1, &st, NULL);
   if (rc != SQLITE_OK) {
@@ -635,7 +822,7 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
   }
   memcpy(blob, "CRSB", 4);
   memset(blob + 4, 0, 8);
-  blob[4] = 1;
+  blob[4] = enforcing ? 2 : 1;
   blob_len = EMPTY_CRSB_LEN;
   uint32_t count = 0;
   int done = 1;
@@ -686,7 +873,8 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
     if (filtering && murmur_cfg_table_disabled(&flags, table_raw, (size_t)table_len)) {
       continue;
     }
-    /* Budget estimate mirrors Go: 64 + per-column bytes-or-8. */
+    /* Budget estimate mirrors Go: 64 + per-column bytes-or-8,
+     * plus the 68-byte sig field under enforcement. */
     int64_t row_bytes = 64;
     for (int i = 0; i < 9; i++) {
       int t = sqlite3_column_type(st, i);
@@ -695,6 +883,9 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
       } else {
         row_bytes += 8;
       }
+    }
+    if (enforcing) {
+      row_bytes += 68;
     }
     if (row_bytes > max_batch_bytes - EMPTY_CRSB_LEN) {
       status = MURMUR_SYNC_OVERLOADED;
@@ -749,9 +940,59 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
     cell.site_len = (size_t)sqlite3_column_bytes(st, 6);
     cell.cl = sqlite3_column_int64(st, 7);
     cell.seq = sqlite3_column_int64(st, 8);
+    uint8_t sigbuf[64];
+    if (enforcing) {
+      /* Origin signature: local rows sign now, forwarded rows
+       * carry their verified stored signature. Anything
+       * unsigned fails the batch (fail closed, loud). */
+      if (cell.site_len != 16) {
+        status = MURMUR_SYNC_PROTOCOL;
+        goto rollback;
+      }
+      if (memcmp(cell.site, local_site.b, 16) == 0) {
+        size_t cneed = 128 + cell.table_len + cell.pk_len +
+                       cell.cid_len + cell.val_blob_len + cell.site_len;
+        uint8_t *canon = (uint8_t *)malloc(cneed ? cneed : 1);
+        if (!canon) {
+          status = sqlite_fail(&fail_rc, SQLITE_NOMEM);
+          goto rollback;
+        }
+        size_t canon_len = murmur_cell_canonical(&cell, canon, cneed);
+        int src = canon_len > 0 ? murmur_cellsign_sign(db, canon,
+                                                       canon_len, sigbuf)
+                                : SQLITE_ERROR;
+        memset(canon, 0, cneed);
+        free(canon);
+        if (src != SQLITE_OK) {
+          fail_rc = src == SQLITE_MISUSE ? SQLITE_AUTH : src;
+          status = src == SQLITE_MISUSE ? MURMUR_SYNC_AUTH
+                                        : sqlite_fail(&fail_rc, src);
+          goto rollback;
+        }
+      } else {
+        int src = SQLITE_OK;
+        int found = murmur_cellsign_lookup(
+            db, cell.table, cell.table_len, cell.pk, cell.pk_len,
+            cell.cid, cell.cid_len, cell.site, cell.col_version, sigbuf,
+            &src);
+        if (found < 0) {
+          status = sqlite_fail(&fail_rc, src);
+          goto rollback;
+        }
+        if (found == 0) {
+          APPLY_DBG("export-unsigned %.*s", (int)cell.table_len,
+                    cell.table);
+          fail_rc = SQLITE_AUTH;
+          status = MURMUR_SYNC_AUTH;
+          goto rollback;
+        }
+      }
+      cell.sig = sigbuf;
+      cell.sig_len = 64;
+    }
     /* Exact encoded length against max_batch_bytes. */
     size_t need = 128 + cell.table_len + cell.pk_len + cell.cid_len +
-                  cell.val_blob_len + cell.site_len;
+                  cell.val_blob_len + cell.site_len + (enforcing ? 68 : 0);
     uint8_t *fields = NULL;
     size_t fields_len = 0;
     for (;;) {
@@ -762,7 +1003,8 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
         goto rollback;
       }
       fields = grown_fields;
-      fields_len = murmur_cell_encode(&cell, fields, need);
+      fields_len = enforcing ? murmur_cell_encode_v2(&cell, fields, need)
+                             : murmur_cell_encode(&cell, fields, need);
       if (fields_len > 0) {
         break;
       }
@@ -844,6 +1086,9 @@ murmur_sync_status_t murmur_sync_export(sqlite3 *db,
     last_arena = NULL;
   }
   murmur_cfg_table_flags_free(&flags);
+  if (trust_loaded) {
+    murmur_cellsign_trust_free(&trust);
+  }
   murmur_db_writer_unlock();
   set_sqlrc(sqlrc, fail_rc);
   return MURMUR_SYNC_OK;
@@ -857,6 +1102,9 @@ rollback:
   }
   murmur_db_writer_unlock();
   murmur_cfg_table_flags_free(&flags);
+  if (trust_loaded) {
+    murmur_cellsign_trust_free(&trust);
+  }
   free(blob);
   free(last_arena);
   set_sqlrc(sqlrc, fail_rc);
@@ -1033,7 +1281,13 @@ murmur_sync_status_t murmur_sync_apply(
         free(blob);
         return sqlite_fail(sqlrc, SQLITE_NOMEM);
       }
-      size_t nenc = murmur_cells_encode(cells, kept, filtered, blob_len);
+      /* Preserve the wire version: v2 keeps its origin
+       * signatures for ingest verification. */
+      int in_v2 = blob_len >= 12 && blob[4] == 2;
+      size_t nenc = in_v2 ? murmur_cells_encode_v2(cells, kept, filtered,
+                                                   blob_len)
+                          : murmur_cells_encode(cells, kept, filtered,
+                                                blob_len);
       free(cells);
       if (nenc == 0) {
         APPLY_DBG("cell-encode kept=%zu", kept);
@@ -1061,6 +1315,12 @@ murmur_sync_status_t murmur_sync_apply(
   if (ingest_len > 0) {
     status = murmur_sync_ingest_blob(db, ingest, ingest_len, &fail_rc);
     if (status != MURMUR_SYNC_OK) {
+      goto apply_rollback;
+    }
+    /* Prune stored signatures with no surviving change row. */
+    int gcrc = murmur_cellsign_gc(db, NULL);
+    if (gcrc != SQLITE_OK) {
+      status = sqlite_fail(&fail_rc, gcrc);
       goto apply_rollback;
     }
   }

@@ -4,6 +4,7 @@ package goharness
 import (
 	"crypto/rand"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,10 +28,15 @@ type ClusterOptions struct {
 	Key *[32]byte
 	// Files stages the file-object store on every node (one uniform
 	// fetch port, distinct 127.0.0.x bind IPs).
-	Files bool
+	Files             bool
+	FileFetchInterval time.Duration
 	// SchemaMaster, when non-nil, is the index of the node that
 	// acts as schema master (nil disables master pushes).
 	SchemaMaster *int
+	// OriginSeeds provisions origin signing per node: entry i
+	// holds node i's 32-byte seed (nil/empty disables signing).
+	// Combine with EnforceOrigins for full origin enforcement.
+	OriginSeeds [][]byte
 }
 
 // Cluster is a live multi-node deployment under runtime/<name>/.
@@ -83,6 +89,9 @@ func NewCluster(opts ClusterOptions) (*Cluster, error) {
 			return nil, err
 		}
 		addrs[i] = ap.String()
+		if opts.Files {
+			addrs[i] = net.JoinHostPort(fmt.Sprintf("127.0.0.%d", i+1), fmt.Sprintf("%d", ap.Port()))
+		}
 	}
 	var fetchPort uint16
 	if opts.Files {
@@ -117,17 +126,23 @@ func NewCluster(opts ClusterOptions) (*Cluster, error) {
 		var fcfg *FilesConfig
 		if opts.Files {
 			fcfg = &FilesConfig{
-				Dir:  filepath.Join(nodeDir, "files"),
-				Key:  c.Key,
-				IP:   fmt.Sprintf("127.0.0.%d", i+1),
-				Port: fetchPort,
+				FetchInterval: opts.FileFetchInterval,
+				Dir:           filepath.Join(nodeDir, "files"),
+				Key:           c.Key,
+				IP:            fmt.Sprintf("127.0.0.%d", i+1),
+				Port:          fetchPort,
 			}
+		}
+		var originSeed []byte
+		if i < len(opts.OriginSeeds) {
+			originSeed = opts.OriginSeeds[i]
 		}
 		n, err := BootNode(NodeConfig{
 			Dir: nodeDir, ID: ids[i], Group: c.Group,
 			Addr: addrs[i], TLS: tls, Key: c.Key,
 			Seeds: seeds, Trust: ids, Child: child, Files: fcfg,
 			SchemaMaster: opts.SchemaMaster != nil && *opts.SchemaMaster == i,
+			OriginSeed:   originSeed,
 		})
 		if err != nil {
 			c.closeAll()
@@ -243,6 +258,30 @@ func (c *Cluster) RestartNode(i int) error {
 		TLS: tls, Key: c.Key, Seeds: seeds, Trust: ids, Child: true,
 		Files: fcfg,
 	})
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.nodes[i] = n
+	c.mu.Unlock()
+	return nil
+}
+
+// ReopenNode closes and reopens an in-process store, including its VFS and all
+// native handles. RestartNode only restarts replication for in-process nodes.
+func (c *Cluster) ReopenNode(i int) error {
+	old := c.nodes[i]
+	old.mu.Lock()
+	cfg := old.bootConfig
+	child := old.child
+	old.mu.Unlock()
+	if child != nil {
+		return fmt.Errorf("ReopenNode requires an in-process node")
+	}
+	if err := old.Close(); err != nil {
+		return err
+	}
+	n, err := BootNode(cfg)
 	if err != nil {
 		return err
 	}

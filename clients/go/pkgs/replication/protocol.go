@@ -680,7 +680,8 @@ func ReadFrame(r io.Reader) (Message, error) {
 	return DecodeMessage(buf)
 }
 
-// Cell is one decoded CRSB change cell.
+// Cell is one decoded CRSB change cell. Sig carries the v2
+// 64-byte origin signature (nil for v1 cells).
 type Cell struct {
 	Table      string
 	PK         []byte
@@ -691,6 +692,7 @@ type Cell struct {
 	SiteID     []byte
 	CL         int64
 	Seq        int64
+	Sig        []byte
 }
 
 // CellVal tags: 0 null, 1 integer, 2 real, 3 text, 4 blob.
@@ -724,6 +726,67 @@ func EncodeCells(cells []Cell) []byte {
 		blob = EncodeCell(blob, c)
 	}
 	return blob
+}
+
+// EncodeCellsV2 serializes cells to CRSB wire bytes with version 2
+// (every cell carries its 64-byte origin signature). All cells must
+// have a 64-byte Sig; otherwise EncodeCellsV2 returns nil.
+func EncodeCellsV2(cells []Cell) []byte {
+	blob := []byte{'C', 'R', 'S', 'B', 2, 0, 0, 0, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(blob[8:12], uint32(len(cells)))
+	for _, c := range cells {
+		nb := EncodeCellV2(blob, c)
+		if nb == nil {
+			return nil
+		}
+		blob = nb
+	}
+	return blob
+}
+
+// EncodeCellV2 appends one v2 cell record (EncodeCell plus the sig
+// field). It returns nil unless the cell has a 64-byte Sig.
+func EncodeCellV2(blob []byte, c Cell) []byte {
+	if len(c.Sig) != 64 {
+		return nil
+	}
+	blob = EncodeCell(blob, c)
+	return appendField(blob, c.Sig)
+}
+
+// CellCanonical returns the signed bytes for one cell, byte-identical
+// to murmur_cell_canonical: domain separator plus the hop-stable
+// merge content (table, pk, cid, value, col_version, site).
+// db_version is reassigned at every ingest hop, so it stays out;
+// cl/seq ride opaquely (stored, echoed, never compared).
+func CellCanonical(c Cell) []byte {
+	out := []byte("MURMUR-CELL-SIGv1")
+	out = append(out, 0)
+	out = appendField(out, []byte(c.Table))
+	out = appendField(out, c.PK)
+	out = appendField(out, []byte(c.CID))
+	var v [8]byte
+	switch c.Val.Tag {
+	case 0:
+		out = append(out, 0)
+	case 1:
+		out = append(out, 1)
+		binary.LittleEndian.PutUint64(v[:], uint64(c.Val.Int))
+		out = append(out, v[:]...)
+	case 2:
+		out = append(out, 2)
+		binary.LittleEndian.PutUint64(v[:], math.Float64bits(c.Val.Real))
+		out = append(out, v[:]...)
+	case 3:
+		out = append(out, 3)
+		out = appendField(out, c.Val.Blob)
+	default:
+		out = append(out, 4)
+		out = appendField(out, c.Val.Blob)
+	}
+	binary.LittleEndian.PutUint64(v[:], uint64(c.ColVersion))
+	out = append(out, v[:]...)
+	return appendField(out, c.SiteID)
 }
 
 // EncodeCell appends one cell record. Export uses it to account the
@@ -804,7 +867,8 @@ func DecodeCells(blob []byte) ([]Cell, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ver[0] != 1 || ver[1] != 0 || ver[2] != 0 || ver[3] != 0 {
+	v2 := ver[0] == 2 && ver[1] == 0 && ver[2] == 0 && ver[3] == 0
+	if !v2 && (ver[0] != 1 || ver[1] != 0 || ver[2] != 0 || ver[3] != 0) {
 		return nil, errProtocol("CRSB version")
 	}
 	cl, err := take(4)
@@ -889,6 +953,16 @@ func DecodeCells(blob []byte) ([]Cell, error) {
 		}
 		if c.Seq, err = takeI64(); err != nil {
 			return nil, err
+		}
+		if v2 {
+			sig, err := takeField()
+			if err != nil {
+				return nil, err
+			}
+			if len(sig) != 64 {
+				return nil, errProtocol("CRSB sig")
+			}
+			c.Sig = append([]byte(nil), sig...)
 		}
 		cells = append(cells, c)
 	}

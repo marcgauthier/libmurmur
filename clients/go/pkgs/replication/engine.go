@@ -59,6 +59,7 @@ type Engine struct {
 	node      NodeID
 	site      NodeID
 	group     NodeID
+	signer    *CellSigner
 	transport Transport
 
 	incarnation uint64
@@ -155,6 +156,18 @@ func (e *Engine) Start() error {
 	if err != nil {
 		return err
 	}
+	// Origin signing key: a configured origin_key_file must load
+	// exactly 32 raw seed bytes; unloadable fails Start loud.
+	// Empty means no local signing (verify/forward only).
+	if keyPath, err := Setting(e.db, "origin_key_file"); err != nil {
+		return err
+	} else if keyPath != "" {
+		signer, err := LoadCellSigner(keyPath)
+		if err != nil {
+			return errAuth("origin_key_file must hold exactly 32 seed bytes")
+		}
+		e.signer = signer
+	}
 	e.group = gid
 	e.node = node
 	e.site = site
@@ -168,6 +181,14 @@ func (e *Engine) Start() error {
 	e.receiving = newByteSem(params.queueBytes)
 	e.gossipFanout = params.gossipFanout
 	e.view = NewView(Member{Node: node, Addr: advertise, Incarnation: incarnation, State: StateAlive})
+	// Reload persisted exclusions: removal must survive restart.
+	excluded, err := loadExcluded(e.db)
+	if err != nil {
+		return err
+	}
+	for _, id := range excluded {
+		e.view.Excluded[id] = true
+	}
 	e.persistedIncarnation = incarnation
 	// Seed the bootstrap dial set from the persisted setting.
 	if raw, err := Setting(e.db, "bootstrap"); err == nil && raw != "" {
@@ -216,6 +237,10 @@ func (e *Engine) Stop() error {
 	e.running = false
 	conns := e.conns
 	e.conns = map[NodeID]Session{}
+	if e.signer != nil {
+		e.signer.seed = [32]byte{}
+		e.signer = nil
+	}
 	e.mu.Unlock()
 	for _, s := range conns {
 		_ = s.Close()

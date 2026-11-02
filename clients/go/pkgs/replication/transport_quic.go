@@ -10,6 +10,7 @@
 package replication
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -146,6 +147,7 @@ type quicParams struct {
 	certFile     string
 	keyFile      string
 	caFile       string
+	crlFile      string
 	allowedPeers map[NodeID]bool
 	allowedNets  []*net.IPNet
 	sessions     int
@@ -169,6 +171,10 @@ func loadQuicParams(db *sqlite.Conn) (quicParams, error) {
 		return p, err
 	}
 	if p.caFile, err = get("ca"); err != nil {
+		return p, err
+	}
+	// crl_file is optional: empty disables revocation checking.
+	if p.crlFile, err = get("crl_file"); err != nil {
 		return p, err
 	}
 	raw, err := get("allowed_peers")
@@ -250,8 +256,10 @@ type QuicTransport struct {
 }
 
 // verifyChain checks rawCerts against roots, ignoring name checks:
-// node identity is the URI SAN, not a DNS name.
-func verifyChain(roots *x509.CertPool, rawCerts [][]byte) ([]*x509.Certificate, error) {
+// node identity is the URI SAN, not a DNS name. revoked holds
+// decimal serials from the configured CRLs; a peer presenting a
+// revoked certificate fails closed.
+func verifyChain(roots *x509.CertPool, rawCerts [][]byte, revoked map[string]bool) ([]*x509.Certificate, error) {
 	if len(rawCerts) == 0 {
 		return nil, errAuth("empty peer chain")
 	}
@@ -276,7 +284,65 @@ func verifyChain(roots *x509.CertPool, rawCerts [][]byte) ([]*x509.Certificate, 
 	if _, err := leaf.Verify(opts); err != nil {
 		return nil, errAuth(err.Error())
 	}
+	if revoked[leaf.SerialNumber.String()] {
+		return nil, errAuth("peer certificate revoked")
+	}
 	return []*x509.Certificate{leaf}, nil
+}
+
+// loadCRLs parses the revocation lists at path (PEM "X509 CRL"
+// blocks, or raw DER) into a decimal-serial set. Every list must be
+// signed by one of issuers and must not be past NextUpdate;
+// anything else fails closed.
+func loadCRLs(path string, issuers []*x509.Certificate) (map[string]bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var ders [][]byte
+	if rest := raw; len(bytes.TrimSpace(rest)) > 0 {
+		for len(rest) > 0 {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type != "X509 CRL" || len(block.Bytes) == 0 {
+				continue
+			}
+			ders = append(ders, block.Bytes)
+		}
+		if len(ders) == 0 {
+			ders = append(ders, raw)
+		}
+	}
+	if len(ders) == 0 {
+		return nil, errInvalid("empty CRL file")
+	}
+	revoked := map[string]bool{}
+	for _, der := range ders {
+		list, err := x509.ParseRevocationList(der)
+		if err != nil {
+			return nil, errAuth(err.Error())
+		}
+		signed := false
+		for _, issuer := range issuers {
+			if list.CheckSignatureFrom(issuer) == nil {
+				signed = true
+				break
+			}
+		}
+		if !signed {
+			return nil, errAuth("CRL not signed by a trusted issuer")
+		}
+		if time.Now().After(list.NextUpdate) {
+			return nil, errAuth("CRL past NextUpdate")
+		}
+		for _, entry := range list.RevokedCertificates {
+			revoked[entry.SerialNumber.String()] = true
+		}
+	}
+	return revoked, nil
 }
 
 // ListenQuic binds the QUIC endpoint for node, loading credentials
@@ -310,12 +376,21 @@ func listenQuicParams(p quicParams, node NodeID) (*QuicTransport, error) {
 		return nil, err
 	}
 	roots := x509.NewCertPool()
+	var issuers []*x509.Certificate
 	for _, raw := range caDER {
 		c, err := x509.ParseCertificate(raw)
 		if err != nil {
 			return nil, errAuth(err.Error())
 		}
 		roots.AddCert(c)
+		issuers = append(issuers, c)
+	}
+	var revoked map[string]bool
+	if p.crlFile != "" {
+		revoked, err = loadCRLs(p.crlFile, issuers)
+		if err != nil {
+			return nil, err
+		}
 	}
 	cert := tls.Certificate{Certificate: chain, PrivateKey: key, Leaf: mustParseLeaf(chain[0])}
 
@@ -329,7 +404,7 @@ func listenQuicParams(p quicParams, node NodeID) (*QuicTransport, error) {
 		NextProtos:         []string{quicALPN},
 		InsecureSkipVerify: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if _, err := verifyChain(roots, rawCerts); err != nil {
+			if _, err := verifyChain(roots, rawCerts, revoked); err != nil {
 				return err
 			}
 			id, err := nodeIDFromCert(rawCerts[0])
@@ -351,7 +426,7 @@ func listenQuicParams(p quicParams, node NodeID) (*QuicTransport, error) {
 		NextProtos:         []string{quicALPN},
 		InsecureSkipVerify: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			_, err := verifyChain(roots, rawCerts)
+			_, err := verifyChain(roots, rawCerts, revoked)
 			return err
 		},
 	}

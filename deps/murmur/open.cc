@@ -2236,6 +2236,18 @@ int nvStoreFlush(uint64_t handle) {
   return SQLITE_OK;
 }
 
+int nvFlushDb(const char *path) {
+  if (!path || !*path) return SQLITE_MISUSE;
+  // A reference pins the live store while the flush runs outside registry locks.
+  uint64_t handle = 0;
+  void *db = nullptr, *store = nullptr;
+  int rc = nvOpenStoreRef(path, 0, 0, &handle, &db, &store);
+  if (rc != SQLITE_OK) return rc;
+  rc = nvStoreFlush(handle);
+  nvCloseStoreRef(handle);
+  return rc;
+}
+
 int nvCommitDb(const char *canon) {
   if (!canon) {
     return SQLITE_OK;

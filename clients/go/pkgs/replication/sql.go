@@ -60,6 +60,52 @@ func persistExcluded(db *sqlite.Conn, id NodeID) error {
 	return execArgs(db, "INSERT OR IGNORE INTO murmur_excluded VALUES(?1)", id[:])
 }
 
+// isExcluded reports whether id is in the durable exclusion set.
+// Query failures fail closed (reported as excluded) so a peer that
+// cannot be vetted is refused.
+func isExcluded(db *sqlite.Conn, id NodeID) (bool, error) {
+	st, err := db.Prepare("SELECT 1 FROM murmur_excluded WHERE node=?1 LIMIT 1")
+	if err != nil {
+		return true, err
+	}
+	defer st.Close()
+	if err := st.BindBlob(1, id[:]); err != nil {
+		return true, err
+	}
+	done, err := st.Step()
+	if err != nil {
+		return true, err
+	}
+	return !done, nil
+}
+
+// loadExcluded returns every id in the durable exclusion set,
+// skipping malformed rows.
+func loadExcluded(db *sqlite.Conn) ([]NodeID, error) {
+	st, err := db.Prepare("SELECT node FROM murmur_excluded")
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	var out []NodeID
+	for {
+		done, err := st.Step()
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return out, nil
+		}
+		raw := st.ColumnBlob(0)
+		if len(raw) != 16 {
+			continue
+		}
+		var id NodeID
+		copy(id[:], raw)
+		out = append(out, id)
+	}
+}
+
 // failTo records err on the engine and fails the statement with the
 // projected extended code plus the message, mirroring rusqlite's
 // SqliteFailure path.

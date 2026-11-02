@@ -158,9 +158,15 @@ func Delete(key []byte) Record { return Record{Key: key} }
 // IsDelete reports a delete record.
 func (r Record) IsDelete() bool { return r.Value == nil }
 
-// BridgeHeader is opaque until the bridge step lands; the snapshot
-// path never constructs one.
-type BridgeHeader struct{}
+// BridgeHeader supplies trusted import policy for a sealed native MHB1 bundle.
+// These keys come from operator configuration, never from the wire payload.
+// The snapshot path does not construct bridge headers.
+type BridgeHeader struct {
+	Database         NodeID
+	Stream           string
+	Signer, Receiver [32]byte
+	StagingBytes     uint64
+}
 
 // Backend is the kv + snapshot surface the engine implements. All
 // calls must serialize on the store; commits are durable.
