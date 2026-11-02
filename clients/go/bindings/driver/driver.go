@@ -94,10 +94,9 @@ func SetSetting(db unsafe.Pointer, name, value string) error {
 	return nil
 }
 
-// Native pull batches contain locally authored cells, matching the receiver
-// check that binds cell sites to the authenticated sender. Configure direct
-// peer connectivity for every origin that must synchronize. Native-only signed
-// journals and file metadata are valid transport schemas without raw user CRRs.
+// Native pull batches relay both locally authored and received cells. Original
+// origin signatures travel through forwarders and remain independently verifiable.
+// Native-only signed journals and file metadata are valid transport schemas.
 //
 // Node is one native replication node: an engine plus a driver over
 // a borrowed SQLite connection. The connection must outlive the Node.
