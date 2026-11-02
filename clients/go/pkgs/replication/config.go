@@ -150,9 +150,9 @@ var defaults = map[string]string{
 	"schema_master":                    "",
 	"schema_master_enabled":            "0",
 	"kdf":                              "direct",
-	"kdf_time":                         "3",
-	"kdf_memory_kib":                   "65536",
-	"kdf_threads":                      "4",
+	"scrypt_n":                         "65536",
+	"scrypt_r":                         "8",
+	"scrypt_p":                         "1",
 	"bridge_dir":                       "",
 	"files_generation":                 "0",
 	"max_file_bytes":                   "4294967296",
@@ -368,26 +368,26 @@ func Validate(name, value string) error {
 		_, err := ParseID(value)
 		return err
 	case "kdf":
-		if value != "direct" && value != "argon2id" {
-			return errors.New("kdf must be direct or argon2id")
+		if value != "direct" && value != "scrypt" {
+			return errors.New("kdf must be direct or scrypt")
 		}
 		return nil
-	case "kdf_time":
-		n, err := parseUint("kdf time 1..32")
+	case "scrypt_n":
+		n, err := parseUint("scrypt N")
+		if err != nil || n < 2 || n > 1<<20 || n&(n-1) != 0 {
+			return errors.New("scrypt_n requires power of two in 2..1048576")
+		}
+		return nil
+	case "scrypt_r":
+		n, err := parseUint("scrypt r")
 		if err != nil || n < 1 || n > 32 {
-			return errors.New("kdf_time outside 1..32")
+			return errors.New("scrypt_r outside 1..32")
 		}
 		return nil
-	case "kdf_memory_kib":
-		n, err := parseUint("kdf memory 1024..16777216 KiB")
-		if err != nil || n < 1024 || n > 16777216 {
-			return errors.New("kdf_memory_kib outside 1024..16777216")
-		}
-		return nil
-	case "kdf_threads":
-		n, err := parseUint("kdf threads 1..32")
-		if err != nil || n < 1 || n > 32 {
-			return errors.New("kdf_threads outside 1..32")
+	case "scrypt_p":
+		n, err := parseUint("scrypt p")
+		if err != nil || n < 1 || n > 16 {
+			return errors.New("scrypt_p outside 1..16")
 		}
 		return nil
 	case "snapshot_trusted_sources":

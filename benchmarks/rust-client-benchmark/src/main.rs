@@ -98,6 +98,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let disk_bytes = tree_bytes(&path);
     let disk_pct = if raw_bytes == 0 { 0.0 } else { disk_bytes as f64 * 100.0 / raw_bytes as f64 };
     println!("seconds,writes,transactions,ops_per_second,write_ops_per_second,tracked_changes,batch_size,read_write_mix,encryption,cipher,compression,replication,replication_crdt,raw_database_bytes,store_disk_bytes,disk_to_raw_pct");
-    println!("{elapsed:.6},{writes},{transactions},{:.3},{:.3},{tracked},{batch},80_read_20_write,on,aegis256,zstd3,on,cr_sqlite_crdt,{raw_bytes},{disk_bytes},{disk_pct:.2}", writes as f64 * 5.0 / elapsed, writes as f64 / elapsed);
+    println!("{elapsed:.6},{writes},{transactions},{:.3},{:.3},{tracked},{batch},80_read_20_write,on,aes256gcm,zstd3,on,cr_sqlite_crdt,{raw_bytes},{disk_bytes},{disk_pct:.2}", writes as f64 * 5.0 / elapsed, writes as f64 / elapsed);
     Ok(())
 }

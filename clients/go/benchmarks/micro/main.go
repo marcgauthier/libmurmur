@@ -97,7 +97,7 @@ func main() {
 		panic("register")
 	}
 	defer murmur.Unregister()
-	db2, rc := murmur.Open(dir2+"/micro.db", &murmur.OpenOptions{Cipher: "aegis256", Compression: "zstd3"})
+	db2, rc := murmur.Open(dir2+"/micro.db", &murmur.OpenOptions{Cipher: "aes256gcm", Compression: "zstd3"})
 	if rc != murmur.CodeOK {
 		panic("open")
 	}

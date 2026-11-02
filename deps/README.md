@@ -15,7 +15,6 @@ for tests remain build prerequisites.
 | `sqlite/` | 3.54.1 | SQLite amalgamation: `sqlite3.c`, `sqlite3.h`, extension header and shell source | Public domain; see source headers and `sqlite/LICENSE.md` |
 | `rocksdb/` | 8.9.1 | RocksDB storage engine, kept on the project's tested API baseline | Apache-2.0 / BSD-3-Clause; see `rocksdb/LICENSE.Apache`, `rocksdb/LICENSE.leveldb` |
 | `zstd/` | 1.5.7 | VFS compression before encryption | BSD-3-Clause / GPL-2.0 alternatives; see `zstd/LICENSE`, `zstd/COPYING` |
-| `aegis/` | 0.9.1 | AEGIS-256 authenticated encryption | MIT; see `aegis/LICENSE` |
 | `aws-lc/` | v5.12.0 | AES-256-GCM page-cipher backend (libcrypto only; prebuilt `lib/libcrypto.a` merged into libmurmur.a) | Apache-2.0 OR ISC; see `aws-lc/LICENSE` |
 | `cr-sqlite/` | cr-sqlite-2 local snapshot | Optional CRR replication, pinned Rust submodule and locked Cargo crates | MIT; see `cr-sqlite/LICENSE` and individual crate licenses |
 

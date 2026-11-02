@@ -15,7 +15,7 @@
 
 /* COFF weak aliases do not supply the ELF-style fallback implementations
  * below. The standalone storage build owns these callbacks outright. */
-#ifdef MURMUR_STORAGE_ONLY
+#if defined(MURMUR_STORAGE_ONLY) || defined(_WIN32)
 #define MURMUR_WEAK
 #else
 #define MURMUR_WEAK __attribute__((weak))

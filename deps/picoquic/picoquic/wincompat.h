@@ -23,13 +23,19 @@
 #define WINCOMPAT_H
 
 #include <stdint.h>
+#ifndef __MINGW32__
 #define ssize_t int
-#include <Winsock2.h>
+#endif
+#include <winsock2.h>
+#ifdef __MINGW32__
+#include <ws2tcpip.h>
+#include <sys/time.h>
+#endif
 
-#ifndef gettimeofday
+#if !defined(__MINGW32__) && !defined(gettimeofday)
 #define gettimeofday wintimeofday
 
-#ifndef __attribute__
+#if !defined(__GNUC__) && !defined(__attribute__)
 #define __attribute__(X)
 #endif
 

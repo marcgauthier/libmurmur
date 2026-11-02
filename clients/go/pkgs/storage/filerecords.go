@@ -8,7 +8,7 @@ import (
 
 // File layout for single-file engines: a 4096-byte header followed by
 // fixed-size page slots. A slot holds a u32le record length plus the
-// EXP record, sized for the largest envelope (keyed AEGIS-256) so
+// EXP record, sized for the largest envelope (keyed AES-256-GCM) so
 // switching ciphers never relocates pages.
 const (
 	headerSize  = 4096
@@ -63,7 +63,7 @@ func (f *fileRecords) load() (recordMeta, error) {
 		return meta, errors.New("storage: bad magic or version")
 	}
 	switch Cipher(hdr[offCipher]) {
-	case CipherAES256GCM, CipherAEGIS256:
+	case CipherAES256GCM:
 		meta.cipher = Cipher(hdr[offCipher])
 	default:
 		return meta, errors.New("storage: unknown cipher")

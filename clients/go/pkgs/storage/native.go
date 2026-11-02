@@ -115,8 +115,6 @@ func (r *nativeRecords) load() (recordMeta, error) {
 		switch string(val) {
 		case "aes256gcm":
 			meta.cipher = CipherAES256GCM
-		case "aegis256":
-			meta.cipher = CipherAEGIS256
 		default:
 			return meta, errors.New("storage: unknown meta:cipher")
 		}

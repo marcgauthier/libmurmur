@@ -65,7 +65,7 @@ void murmur_tool_usage(void) {
       "Murmur storage: encrypted RocksDB directories only.\n"
       "  --passphrase-fd N   Read one passphrase line from descriptor N\n"
       "Otherwise a hidden passphrase prompt uses /dev/tty, independently of SQL stdin.\n"
-      "New stores: AES-256-GCM, zstd3, Argon2id keyring protection.\n"
+      "New stores: AES-256-GCM, zstd3, scrypt keyring protection.\n"
       "One session credential is used for .open, ATTACH, and encrypted backups.\n"
       "WAL, alternative VFSes, append/ZIP/deserialize database modes,\n"
       ".open --new, and .backup --async are unsupported.\n\n");
@@ -319,7 +319,7 @@ static int tool_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file,
   hex[64] = 0;
   rc = file_pragma(file, "key", hex);
   wipe(hex, sizeof(hex));
-  if (rc == SQLITE_OK && creating) rc = file_pragma(file, "murmur_kdf", "argon2id");
+  if (rc == SQLITE_OK && creating) rc = file_pragma(file, "murmur_kdf", "scrypt");
   if (rc != SQLITE_OK) {
     error("cannot unlock or provision store; check the passphrase and store integrity");
     file->pMethods->xClose(file);

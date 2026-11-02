@@ -1272,7 +1272,7 @@ static void test_config_validate(void) {
   check_valid(db, "retention_gc", "1", 1);
   check_valid(db, "retention_gc", "2", 0);
   check_valid(db, "kdf", "direct", 1);
-  check_valid(db, "kdf", "argon2id", 1);
+  check_valid(db, "kdf", "scrypt", 1);
   check_valid(db, "kdf", "AES", 0);
   /* Addresses. */
   check_valid(db, "bind", "0.0.0.0:7443", 1);
@@ -1323,8 +1323,10 @@ static void test_config_validate(void) {
   check_valid(db, "batch_bytes", "65535", 0);
   check_valid(db, "snapshot_bytes", "1099511627776", 1);
   check_valid(db, "snapshot_bytes", "1099511627777", 0);
-  check_valid(db, "kdf_memory_kib", "1024", 1);
-  check_valid(db, "kdf_memory_kib", "1023", 0);
+  check_valid(db, "scrypt_r", "8", 1);
+  check_valid(db, "scrypt_n", "3", 0);
+  check_valid(db, "kdf", "argon2id", 0);
+  check_valid(db, "scrypt_r", "0", 0);
   /* JSON maps. */
   check_valid(db, "table_replication", "{\"t\":false}", 1);
   check_valid(db, "table_replication", "{\"t\":0}", 0);

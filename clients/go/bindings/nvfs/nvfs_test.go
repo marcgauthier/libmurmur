@@ -84,7 +84,7 @@ func TestNativeStoreRoundTrip(t *testing.T) {
 }
 
 func TestCodecSealRoundTrip(t *testing.T) {
-	for _, cipher := range []storage.Cipher{storage.CipherAES256GCM, storage.CipherAEGIS256} {
+	for _, cipher := range []storage.Cipher{storage.CipherAES256GCM} {
 		key := testKey()
 		h := nvfs.CodecCreate(int(cipher), 3, key[:], false, nil, 0, nil, nil, key[:])
 		if h == nil {

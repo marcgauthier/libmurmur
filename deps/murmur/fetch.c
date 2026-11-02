@@ -1,7 +1,7 @@
 /* murmur fetch - native file fetch service. See fetch.h. */
 #include "fetch.h"
 
-#include <arpa/inet.h>
+#include "platform_net.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "platform_file.h"
 
 #include "filecodec.h"
 #include "postcard.h"

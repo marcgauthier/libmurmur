@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/vlcn-io/cr-sqlite",
+  "revision": "43ab94cac537d080aac7cb7628a435c02ee9e268",
+  "sqlite_rs_embedded_repository": "https://github.com/vlcn-io/sqlite-rs-embedded",
+  "sqlite_rs_embedded_revision": "aba562843b26642e2242f8e3388b83a1a2625031",
+  "rust_toolchain": "nightly-2023-10-05"
+}

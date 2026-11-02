@@ -7,9 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__linux__) || defined(__APPLE__)
-#include <arpa/inet.h>
-#endif
+#include "platform_net.h"
 
 const char *murmur_mship_status_str(murmur_mship_status_t st) {
   switch (st) {

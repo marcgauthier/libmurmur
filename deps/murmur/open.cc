@@ -123,20 +123,19 @@ constexpr char kMetaKeyring[] = "meta:keyring";
 
 // Cipher ids match the C ABI (murmur_cipher_t) and Go Cipher.
 constexpr int kCipherAES = 1;
-constexpr int kCipherAEGIS = 2;
 
-// KDF ids match Go KDFDirectHKDF/KDFArgon2ID.
+// KDF ids match Go KDFDirectHKDF/KDFScrypt.
 constexpr uint8_t kKDFDirect = 0;
-constexpr uint8_t kKDFArgon2ID = 1;
+constexpr uint8_t kKDFScrypt = 2;
 
 // Defaults mirror Go newEngine.
 constexpr int kCachePagesDefault = 16384;
 constexpr unsigned kFlushMsDefault = 250;
 constexpr int kCompressionDefault = 3;
 constexpr int kCompressionMax = 22;  // bindings/zstd MaxLevel
-constexpr uint32_t kArgonTimeDefault = 3;
-constexpr uint32_t kArgonMemoryDefault = 65536;
-constexpr uint8_t kArgonThreadsDefault = 4;
+constexpr uint32_t kScryptNDefault = 65536;
+constexpr uint32_t kScryptRDefault = 8;
+constexpr uint8_t kScryptPDefault = 1;
 constexpr size_t kStoreIDLen = 16;
 constexpr size_t kMaxValue = 1 << 20;  // nativeMaxValue
 
@@ -229,14 +228,14 @@ struct OpenStore {
   bool rocksSync = false;
   bool sealed = false;
   uint8_t kdf = kKDFDirect;  // envelope header once sealed
-  uint32_t ringTime = 0;
-  uint32_t ringMem = 0;
-  uint8_t ringThreads = 0;
+  uint32_t ringN = 0;
+  uint32_t ringR = 0;
+  uint8_t ringP = 0;
   uint32_t ringCurrent = 0;
   uint8_t stagedKDF = kKDFDirect;  // write-never, like Go
-  uint32_t stagedTime = kArgonTimeDefault;
-  uint32_t stagedMemory = kArgonMemoryDefault;
-  uint8_t stagedThreads = kArgonThreadsDefault;
+  uint32_t stagedN = kScryptNDefault;
+  uint32_t stagedR = kScryptRDefault;
+  uint8_t stagedP = kScryptPDefault;
   bool hasSID = false;
   uint8_t storeID[kStoreIDLen] = {0};
   uint64_t committedSize = 0;
@@ -385,8 +384,6 @@ int probeMeta(NvStore *s, MetaProbe *m) {
     std::string text((const char *)val.data(), val.size());
     if (text == "aes256gcm") {
       m->cipher = kCipherAES;
-    } else if (text == "aegis256") {
-      m->cipher = kCipherAEGIS;
     } else {
       return NV_CTL_IOERR;  // unknown meta:cipher
     }
@@ -497,9 +494,9 @@ int provisionLocked(OpenStore *st) {
   }
   st->sealed = sealed;
   st->kdf = kdf;
-  st->ringTime = rtime;
-  st->ringMem = rmem;
-  st->ringThreads = rthreads;
+  st->ringN = rtime;
+  st->ringR = rmem;
+  st->ringP = rthreads;
   st->ringCurrent = current;
   st->db.store(db);
   return NV_CTL_OK;
@@ -673,13 +670,13 @@ int sealLocked(OpenStore *st, uint8_t kdf, bool hasMaster,
     wipeEff();
     return NV_CTL_ERROR;
   }
-  // Direct-HKDF seals take the master; Argon2 seals take it as
-  // passphrase bytes; direct seals stage no Argon2 params (Go
+  // Direct-HKDF seals take the master; scrypt seals take it as
+  // passphrase bytes; direct seals stage no scrypt params (Go
   // zeroes them).
   bool direct = kdf == kKDFDirect;
-  uint32_t atime = direct ? 0 : st->stagedTime;
-  uint32_t amem = direct ? 0 : st->stagedMemory;
-  uint8_t athreads = direct ? 0 : st->stagedThreads;
+  uint32_t atime = direct ? 0 : st->stagedN;
+  uint32_t amem = direct ? 0 : st->stagedR;
+  uint8_t athreads = direct ? 0 : st->stagedP;
   const uint8_t *cMaster = direct ? effMaster : nullptr;
   const uint8_t *cPass = direct ? nullptr : effMaster;
   uint8_t *env = nullptr;
@@ -737,11 +734,11 @@ int sealLocked(OpenStore *st, uint8_t kdf, bool hasMaster,
   }
   st->sealed = true;
   st->kdf = kdf;
-  // Direct-HKDF seals stage no Argon2 params (Go zeroes them), so
+  // Direct-HKDF seals stage no scrypt params (Go zeroes them), so
   // the sealed header reads back zeros, matching reopen decodes.
-  st->ringTime = (kdf == kKDFDirect) ? 0 : st->stagedTime;
-  st->ringMem = (kdf == kKDFDirect) ? 0 : st->stagedMemory;
-  st->ringThreads = (kdf == kKDFDirect) ? 0 : st->stagedThreads;
+  st->ringN = (kdf == kKDFDirect) ? 0 : st->stagedN;
+  st->ringR = (kdf == kKDFDirect) ? 0 : st->stagedR;
+  st->ringP = (kdf == kKDFDirect) ? 0 : st->stagedP;
   st->ringCurrent = ring.current;
   if (hasMaster && master) {
     // The persisted envelope is now the explicit master's: keep the
@@ -763,16 +760,16 @@ int setParamLocked(OpenStore *st, int param, uint64_t value, bool readOnly,
   bool ok = false;
   switch (param) {
     case NV_CTL_PARAM_KDF:
-      ok = value <= 1;
+      ok = value == kKDFDirect || value == kKDFScrypt;
       break;
-    case NV_CTL_PARAM_TIME:
+    case NV_CTL_PARAM_SCRYPT_N:
+      ok = value >= 2 && value <= (1u << 20) && (value & (value - 1)) == 0;
+      break;
+    case NV_CTL_PARAM_SCRYPT_R:
       ok = value >= 1 && value <= 32;
       break;
-    case NV_CTL_PARAM_MEMORY:
-      ok = value >= 1024 && value <= 16777216;
-      break;
-    case NV_CTL_PARAM_THREADS:
-      ok = value >= 1 && value <= 32;
+    case NV_CTL_PARAM_SCRYPT_P:
+      ok = value >= 1 && value <= 16;
       break;
     default:
       return NV_CTL_MISUSE;
@@ -784,14 +781,14 @@ int setParamLocked(OpenStore *st, int param, uint64_t value, bool readOnly,
     return NV_CTL_BUSY;
   }
   switch (param) {
-    case NV_CTL_PARAM_TIME:
-      st->stagedTime = (uint32_t)value;
+    case NV_CTL_PARAM_SCRYPT_N:
+      st->stagedN = (uint32_t)value;
       return NV_CTL_OK;
-    case NV_CTL_PARAM_MEMORY:
-      st->stagedMemory = (uint32_t)value;
+    case NV_CTL_PARAM_SCRYPT_R:
+      st->stagedR = (uint32_t)value;
       return NV_CTL_OK;
-    case NV_CTL_PARAM_THREADS:
-      st->stagedThreads = (uint8_t)value;
+    case NV_CTL_PARAM_SCRYPT_P:
+      st->stagedP = (uint8_t)value;
       return NV_CTL_OK;
     default:
       break;
@@ -806,22 +803,22 @@ PragmaOut serveKDFLocked(OpenStore *st, const std::string &name,
   int param = 0;
   if (name == "murmur_kdf") {
     if (st->sealed) {
-      current = (st->kdf == kKDFArgon2ID) ? "argon2id" : "direct";
-    } else if (st->stagedKDF == kKDFArgon2ID) {
-      current = "argon2id";
+      current = (st->kdf == kKDFScrypt) ? "scrypt" : "direct";
+    } else if (st->stagedKDF == kKDFScrypt) {
+      current = "scrypt";
     } else {
       current = "direct";
     }
     param = NV_CTL_PARAM_KDF;
-  } else if (name == "murmur_kdf_time") {
-    current = utoa(st->sealed ? st->ringTime : st->stagedTime);
-    param = NV_CTL_PARAM_TIME;
-  } else if (name == "murmur_kdf_memory_kib") {
-    current = utoa(st->sealed ? st->ringMem : st->stagedMemory);
-    param = NV_CTL_PARAM_MEMORY;
+  } else if (name == "murmur_scrypt_n") {
+    current = utoa(st->sealed ? st->ringN : st->stagedN);
+    param = NV_CTL_PARAM_SCRYPT_N;
+  } else if (name == "murmur_scrypt_r") {
+    current = utoa(st->sealed ? st->ringR : st->stagedR);
+    param = NV_CTL_PARAM_SCRYPT_R;
   } else {
-    current = utoa(st->sealed ? st->ringThreads : st->stagedThreads);
-    param = NV_CTL_PARAM_THREADS;
+    current = utoa(st->sealed ? st->ringP : st->stagedP);
+    param = NV_CTL_PARAM_SCRYPT_P;
   }
   if (!hasValue) {
     r.code = NV_CTL_OK;
@@ -843,11 +840,11 @@ PragmaOut serveKDFLocked(OpenStore *st, const std::string &name,
     std::string low = value ? asciiLower(value) : "";
     if (low == "direct") {
       v = kKDFDirect;
-    } else if (low == "argon2id") {
-      v = kKDFArgon2ID;
+    } else if (low == "scrypt") {
+      v = kKDFScrypt;
     } else {
       r.code = NV_CTL_ERROR;
-      r.text = "murmur_kdf must be direct or argon2id";
+      r.text = "murmur_kdf must be direct or scrypt";
       return r;
     }
     int rc = setParamLocked(st, param, v, readOnly);
@@ -856,7 +853,7 @@ PragmaOut serveKDFLocked(OpenStore *st, const std::string &name,
       return r;
     }
     r.code = NV_CTL_OK;
-    r.text = (v == kKDFArgon2ID) ? "argon2id" : "direct";
+    r.text = (v == kKDFScrypt) ? "scrypt" : "direct";
     return r;
   }
   uint64_t v = 0;
@@ -874,12 +871,12 @@ PragmaOut serveKDFLocked(OpenStore *st, const std::string &name,
     return r;
   }
   r.code = NV_CTL_OK;
-  if (param == NV_CTL_PARAM_TIME) {
-    r.text = utoa(st->stagedTime);
-  } else if (param == NV_CTL_PARAM_MEMORY) {
-    r.text = utoa(st->stagedMemory);
+  if (param == NV_CTL_PARAM_SCRYPT_N) {
+    r.text = utoa(st->stagedN);
+  } else if (param == NV_CTL_PARAM_SCRYPT_R) {
+    r.text = utoa(st->stagedR);
   } else {
-    r.text = utoa(st->stagedThreads);
+    r.text = utoa(st->stagedP);
   }
   return r;
 }
@@ -1265,9 +1262,6 @@ const char *cipherName(int c) {
   if (c == kCipherAES) {
     return "aes256gcm";
   }
-  if (c == kCipherAEGIS) {
-    return "aegis256";
-  }
   return "unspecified";
 }
 
@@ -1284,11 +1278,9 @@ PragmaOut serveCipherLocked(OpenStore *st, const char *value, bool hasValue,
     std::string text = value ? value : "";
     if (asciiEqualFold(text, "aes256gcm")) {
       c = kCipherAES;
-    } else if (asciiEqualFold(text, "aegis256")) {
-      c = kCipherAEGIS;
     } else {
       r.code = NV_CTL_ERROR;
-      r.text = "cipher must be aes256gcm or aegis256";
+      r.text = "cipher must be aes256gcm";
       return r;
     }
     // Engine.SetCipher port (its readOnly pre-check is subsumed by
@@ -1336,8 +1328,8 @@ PragmaOut serveLocked(OpenStore *st, const std::string &name,
   PragmaOut r;
   std::string low = asciiLower(name);
   if (low.compare(0, 7, "murmur_") == 0) {
-    if (low == "murmur_kdf" || low == "murmur_kdf_time" ||
-        low == "murmur_kdf_memory_kib" || low == "murmur_kdf_threads") {
+    if (low == "murmur_kdf" || low == "murmur_scrypt_n" ||
+        low == "murmur_scrypt_r" || low == "murmur_scrypt_p") {
       return serveKDFLocked(st, low, value, hasValue, readOnly);
     }
     r.extension = true;
@@ -1982,9 +1974,9 @@ int nvStoreRotate(uint64_t handle, int read_only, uint32_t *new_id) {
   st->keyringEnv.assign(new_env, new_env + new_len);
   wipe(new_env, new_len);
   murmur_kr_free(new_env);
-  st->ringTime = ring.time;
-  st->ringMem = ring.mem;
-  st->ringThreads = ring.threads;
+  st->ringN = ring.time;
+  st->ringR = ring.mem;
+  st->ringP = ring.threads;
   st->ringCurrent = ring.current;
   *new_id = next;
   return NV_CTL_OK;
@@ -2138,9 +2130,9 @@ int nvStorePrune(uint64_t handle, int read_only, char *out, size_t cap,
     }
     if (rc == NV_CTL_OK) {
       st->keyringEnv.assign(new_env, new_env + new_len);
-      st->ringTime = fresh.time;
-      st->ringMem = fresh.mem;
-      st->ringThreads = fresh.threads;
+      st->ringN = fresh.time;
+      st->ringR = fresh.mem;
+      st->ringP = fresh.threads;
       st->ringCurrent = fresh.current;
     }
     wipe(new_env, new_len);
@@ -2186,15 +2178,15 @@ int nvStoreKdf(uint64_t handle, int *sealed, uint8_t *kdf, uint32_t *time_ms,
   if (st->sealed) {
     *sealed = 1;
     *kdf = st->kdf;
-    *time_ms = st->ringTime;
-    *mem_kib = st->ringMem;
-    *threads = st->ringThreads;
+    *time_ms = st->ringN;
+    *mem_kib = st->ringR;
+    *threads = st->ringP;
   } else {
     *sealed = 0;
     *kdf = st->stagedKDF;
-    *time_ms = st->stagedTime;
-    *mem_kib = st->stagedMemory;
-    *threads = st->stagedThreads;
+    *time_ms = st->stagedN;
+    *mem_kib = st->stagedR;
+    *threads = st->stagedP;
   }
   return SQLITE_OK;
 }

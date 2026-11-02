@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {"name": "linux", "generator": "Ninja", "binaryDir": "${sourceDir}/build/cmake-linux", "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}},
+    {"name": "mingw", "generator": "Ninja", "binaryDir": "${sourceDir}/build/cmake-mingw", "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "OPENSSL_NO_ASM": "ON"}},
+    {"name": "win64-cross", "inherits": "mingw", "binaryDir": "${sourceDir}/build/cmake-win64", "toolchainFile": "${sourceDir}/cmake/mingw-w64.cmake"}
+  ],
+  "buildPresets": [
+    {"name": "linux", "configurePreset": "linux"},
+    {"name": "mingw", "configurePreset": "mingw"},
+    {"name": "win64-cross", "configurePreset": "win64-cross"}
+  ]
+}

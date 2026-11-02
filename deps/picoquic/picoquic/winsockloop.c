@@ -48,8 +48,8 @@ int picoquic_packet_loop_win(picoquic_quic_t* quic,
 }
 #else
 #define WIN32_LEAN_AND_MEAN
-#include <WinSock2.h>
-#include <Windows.h>
+#include <winsock2.h>
+#include <windows.h>
 #include <assert.h>
 #include <iphlpapi.h>
 #include <stdint.h>
@@ -538,7 +538,7 @@ int picoquic_packet_loop_win(picoquic_quic_t* quic,
                             }
 
                             if (recv_length == 4) {
-                                DBG_PRINTF("Local!");
+                                DBG_PRINTF("%s", "Local!");
                             }
                             else {
                                 /* Submit the packet to the client */
@@ -559,7 +559,7 @@ int picoquic_packet_loop_win(picoquic_quic_t* quic,
                         }
                     }
                     else {
-                        DBG_PRINTF("Packet processing error\r\n");
+                        DBG_PRINTF("%s", "Packet processing error\r\n");
                     }
 
                     if (ret == 0 && loop_callback != NULL) {

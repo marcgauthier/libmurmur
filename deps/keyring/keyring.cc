@@ -12,7 +12,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "../../deps/argon2/argon2.h"
+#include "scrypt.h"
 #include "../../deps/codec/aesgcm.h"
 #include "crc32c.h"
 #include "hkdf.h"
@@ -98,17 +98,17 @@ int derive_protector(uint8_t kdf, const uint8_t *master, size_t master_len,
     }
     return MURMUR_KR_OK;
   }
-  if (kdf == MURMUR_KDF_ARGON2ID) {
+  if (kdf == MURMUR_KDF_SCRYPT) {
     if (pass_len == 0) {
       return MURMUR_KR_AUTH;
     }
-    if (a_threads == 0 || a_time == 0 || a_mem == 0) {
+    if (!murmur_scrypt_params_valid(a_time, a_mem, a_threads)) {
       return MURMUR_KR_CORRUPT;
     }
     uint8_t stretched[32];
-    int rc = argon2id_hash_raw(a_time, a_mem, a_threads, pass, pass_len, salt,
-                               kSaltLen, stretched, sizeof(stretched));
-    if (rc != ARGON2_OK) {
+    int rc = murmur_scrypt_derive(pass, pass_len, salt, kSaltLen,
+                                  a_time, a_mem, a_threads, stretched, sizeof(stretched));
+    if (rc != 0) {
       wipe_mem(stretched, sizeof(stretched));
       return MURMUR_KR_CORRUPT;
     }
@@ -130,9 +130,9 @@ struct SealArgs {
   const uint8_t *context_id;
   const uint8_t *wrap_id;
   size_t wrap_len;
-  uint32_t argon_time;
-  uint32_t argon_mem;
-  uint8_t argon_threads;
+  uint32_t scrypt_n;
+  uint32_t scrypt_r;
+  uint8_t scrypt_p;
   const uint8_t *master;
   size_t master_len;
   const uint8_t *pass;
@@ -142,7 +142,7 @@ struct SealArgs {
 
 /* seal_locked mirrors Seal: fresh salt/nonce, AES-GCM body. */
 int seal_locked(const SealArgs &a, std::vector<uint8_t> *env) {
-  if (a.kdf != MURMUR_KDF_DIRECT && a.kdf != MURMUR_KDF_ARGON2ID) {
+  if (a.kdf != MURMUR_KDF_DIRECT && a.kdf != MURMUR_KDF_SCRYPT) {
     return MURMUR_KR_MISUSE;
   }
   if (a.wrap_len > kMaxWrapID || a.keys.empty() ||
@@ -165,7 +165,7 @@ int seal_locked(const SealArgs &a, std::vector<uint8_t> *env) {
   }
   uint8_t protector[kKeyLen];
   int rc = derive_protector(a.kdf, a.master, a.master_len, a.pass, a.pass_len,
-                            salt, a.argon_time, a.argon_mem, a.argon_threads,
+                            salt, a.scrypt_n, a.scrypt_r, a.scrypt_p,
                             a.store_id, a.context_id, protector);
   if (rc != MURMUR_KR_OK) {
     return rc;
@@ -203,12 +203,12 @@ int seal_locked(const SealArgs &a, std::vector<uint8_t> *env) {
   for (int i = 0; i < 4; i++) {
     hdr.push_back(0);
   }
-  store32le(hdr.data() + 47, a.argon_time);
+  store32le(hdr.data() + 47, a.scrypt_n);
   for (int i = 0; i < 4; i++) {
     hdr.push_back(0);
   }
-  store32le(hdr.data() + 51, a.argon_mem);
-  hdr.push_back(a.argon_threads);
+  store32le(hdr.data() + 51, a.scrypt_r);
+  hdr.push_back(a.scrypt_p);
   hdr.push_back((uint8_t)a.wrap_len);
   hdr.insert(hdr.end(), a.wrap_id, a.wrap_id + a.wrap_len);
   uint8_t crc[4];
@@ -271,7 +271,7 @@ OpenedRing open_locked(const uint8_t *env, size_t env_len,
     return o;
   }
   uint8_t kdf = env[6];
-  if (kdf != MURMUR_KDF_DIRECT && kdf != MURMUR_KDF_ARGON2ID) {
+  if (kdf != MURMUR_KDF_DIRECT && kdf != MURMUR_KDF_SCRYPT) {
     return o;
   }
   size_t wrap_len = env[56];
@@ -364,9 +364,9 @@ OpenedRing open_locked(const uint8_t *env, size_t env_len,
   murmur_keyring_t &r = o.ring;
   r.seq = seq;
   r.kdf = kdf;
-  r.argon_time = a_time;
-  r.argon_mem_kib = a_mem;
-  r.argon_threads = a_threads;
+  r.scrypt_n = a_time;
+  r.scrypt_r = a_mem;
+  r.scrypt_p = a_threads;
   memcpy(r.context, context_id, 16);
   r.wrap_id = nullptr;
   r.wrap_len = w;
@@ -501,8 +501,8 @@ murmur_keyring_t *murmur_kr_open(const uint8_t *env, size_t env_len,
   return r;
 }
 
-int murmur_kr_create(uint8_t kdf, uint32_t argon_time, uint32_t argon_mem_kib,
-                     uint8_t argon_threads, const uint8_t *wrap_id,
+int murmur_kr_create(uint8_t kdf, uint32_t scrypt_n, uint32_t scrypt_r,
+                     uint8_t scrypt_p, const uint8_t *wrap_id,
                      size_t wrap_len, const uint8_t store_id[16],
                      const uint8_t context_id[16], const uint8_t *master,
                      size_t master_len, const uint8_t *pass, size_t pass_len,
@@ -511,15 +511,15 @@ int murmur_kr_create(uint8_t kdf, uint32_t argon_time, uint32_t argon_mem_kib,
       (wrap_len && !wrap_id) || (master_len && !master) || (pass_len && !pass)) {
     return MURMUR_KR_MISUSE;
   }
-  if (kdf != MURMUR_KDF_DIRECT && kdf != MURMUR_KDF_ARGON2ID) {
+  if (kdf != MURMUR_KDF_DIRECT && kdf != MURMUR_KDF_SCRYPT) {
     return MURMUR_KR_MISUSE;
   }
   if (kdf == MURMUR_KDF_DIRECT &&
-      (argon_time != 0 || argon_mem_kib != 0 || argon_threads != 0)) {
+      (scrypt_n != 0 || scrypt_r != 0 || scrypt_p != 0)) {
     return MURMUR_KR_MISUSE;
   }
-  if (kdf == MURMUR_KDF_ARGON2ID &&
-      (argon_time == 0 || argon_mem_kib == 0 || argon_threads == 0)) {
+  if (kdf == MURMUR_KDF_SCRYPT &&
+      (!murmur_scrypt_params_valid(scrypt_n, scrypt_r, scrypt_p))) {
     return MURMUR_KR_MISUSE;
   }
   murmur_key_entry_t first;
@@ -536,9 +536,9 @@ int murmur_kr_create(uint8_t kdf, uint32_t argon_time, uint32_t argon_mem_kib,
   a.context_id = context_id;
   a.wrap_id = wrap_id;
   a.wrap_len = wrap_len;
-  a.argon_time = argon_time;
-  a.argon_mem = argon_mem_kib;
-  a.argon_threads = argon_threads;
+  a.scrypt_n = scrypt_n;
+  a.scrypt_r = scrypt_r;
+  a.scrypt_p = scrypt_p;
   a.master = master;
   a.master_len = master_len;
   a.pass = pass;
@@ -589,9 +589,9 @@ int murmur_kr_rotate(const murmur_keyring_t *ring, const uint8_t store_id[16],
   a.context_id = ring->context;
   a.wrap_id = ring->wrap_id;
   a.wrap_len = ring->wrap_len;
-  a.argon_time = ring->argon_time;
-  a.argon_mem = ring->argon_mem_kib;
-  a.argon_threads = ring->argon_threads;
+  a.scrypt_n = ring->scrypt_n;
+  a.scrypt_r = ring->scrypt_r;
+  a.scrypt_p = ring->scrypt_p;
   a.master = master;
   a.master_len = master_len;
   a.pass = pass;
@@ -646,9 +646,9 @@ int murmur_kr_drop(const murmur_keyring_t *ring, const uint32_t *drop_ids,
   a.context_id = ring->context;
   a.wrap_id = ring->wrap_id;
   a.wrap_len = ring->wrap_len;
-  a.argon_time = ring->argon_time;
-  a.argon_mem = ring->argon_mem_kib;
-  a.argon_threads = ring->argon_threads;
+  a.scrypt_n = ring->scrypt_n;
+  a.scrypt_r = ring->scrypt_r;
+  a.scrypt_p = ring->scrypt_p;
   a.master = master;
   a.master_len = master_len;
   a.pass = pass;
@@ -724,11 +724,11 @@ int murmur_kr_open_flat(const uint8_t *env, size_t env_len,
   store64le(tmp, r->seq);
   flat.insert(flat.end(), tmp, tmp + 8);
   flat.push_back(r->kdf);
-  store32le(tmp, r->argon_time);
+  store32le(tmp, r->scrypt_n);
   flat.insert(flat.end(), tmp, tmp + 4);
-  store32le(tmp, r->argon_mem_kib);
+  store32le(tmp, r->scrypt_r);
   flat.insert(flat.end(), tmp, tmp + 4);
-  flat.push_back(r->argon_threads);
+  flat.push_back(r->scrypt_p);
   store32le(tmp, r->current);
   flat.insert(flat.end(), tmp, tmp + 4);
   store32le(tmp, (uint32_t)r->nkeys);
@@ -754,8 +754,8 @@ int murmur_kr_open_flat(const uint8_t *env, size_t env_len,
 
 int murmur_kr_seal_flat(uint8_t kdf, uint64_t seq, const uint8_t store_id[16],
                         const uint8_t context_id[16], const uint8_t *wrap_id,
-                        size_t wrap_len, uint32_t argon_time,
-                        uint32_t argon_mem_kib, uint8_t argon_threads,
+                        size_t wrap_len, uint32_t scrypt_n,
+                        uint32_t scrypt_r, uint8_t scrypt_p,
                         const uint8_t *master, size_t master_len,
                         const uint8_t *pass, size_t pass_len,
                         const uint8_t *flat_keys, size_t nkeys,
@@ -772,9 +772,9 @@ int murmur_kr_seal_flat(uint8_t kdf, uint64_t seq, const uint8_t store_id[16],
   a.context_id = context_id;
   a.wrap_id = wrap_id;
   a.wrap_len = wrap_len;
-  a.argon_time = argon_time;
-  a.argon_mem = argon_mem_kib;
-  a.argon_threads = argon_threads;
+  a.scrypt_n = scrypt_n;
+  a.scrypt_r = scrypt_r;
+  a.scrypt_p = scrypt_p;
   a.master = master;
   a.master_len = master_len;
   a.pass = pass;

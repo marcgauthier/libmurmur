@@ -1,36 +1,51 @@
-# cr-sqlite (Rust core) vendored for sqlite-murmur-go
+# Vendored upstream cr-sqlite
 
-Real cr-sqlite, same fork and build the Rust `sqlite-murmur` links, so Go
-and Rust capture, merge, and replicate with identical code and format.
+Source: https://github.com/vlcn-io/cr-sqlite
 
-- `src/` — the three C integration files plus their headers, copied
-  unmodified from `third-party/cr-sqlite/core/src/` in the sibling
-  `sqlite-murmur` checkout: `crsqlite.c`, `changes-vtab.c`,
-  `ext-data.c`. Compiled with `-DSQLITE_CORE` against the vendored
-  SQLite 3.54.1 in `../sqlite/` (same version the Rust build uses).
-- `include/sqlite_murmur_crsqlite.h` — public init header, copied from
-  `sqlite-murmur/include/`. Open a connection, then call
-  `sqlite3_crsqlite_init(db, &err, NULL)`; run
-  `SELECT crsql_finalize()` before `sqlite3_close()`.
-- `lib/libcrsql_bundle_isolated.a` — prebuilt Rust core
-  (`core/rs/bundle_static`, release) with its Rust runtime symbols
-  renamed to the `crsql_` prefix so the archive links alongside any
-  other static libraries. Copied from
-  `sqlite-murmur/build-a1/crsqlite2/`.
-- `LICENSE` — cr-sqlite MIT license.
+`UPSTREAM.json` pins revision `43ab94cac537d080aac7cb7628a435c02ee9e268`
+and its `sqlite-rs-embedded` submodule revision. This folder contains the C
+integration in `src/` and Rust implementations in `rs/`, including the SQLite
+bindings submodule. Upstream source files are copied without local changes.
+The upstream Cargo lockfile and `nightly-2023-10-05` toolchain are retained.
 
-## Rebuild
+`wrapper_tu.c` compiles upstream's three integration sources as one translation
+unit against libmurmur's bundled SQLite with `SQLITE_CORE`. It then registers
+libmurmur's C CRSB compatibility adapter (`deps/murmur/crsqlite_ingest.c`).
+The adapter implements `crsql_ingest_blob` through upstream's public
+`crsql_changes` virtual table. The previous fork-specific bulk-merge
+optimizations and shared C/Rust structure extensions are replaced by the
+matching upstream implementations. Wire envelopes remain in libmurmur.
 
-From the sibling `sqlite-murmur` checkout (needs its pinned Rust
-nightly toolchain plus libclang):
+## Build
 
-```
-cmake -S . -B build-a1 -DSQLITE_MURMUR_ENABLE_CRSQLITE=ON
-cmake --build build-a1 --target crsqlite_isolated_build
-cp build-a1/crsqlite2/libcrsql_bundle_isolated.a \
-  ../sqlite-murmur-go/deps/crsqlite/lib/
+Install Rust through rustup, the pinned nightly, and libclang (for bindgen):
+
+```sh
+rustup toolchain install nightly-2023-10-05 --profile minimal
+rustup target add --toolchain nightly-2023-10-05 x86_64-pc-windows-gnu
 ```
 
-If the Rust revision changes, re-copy `src/` and `include/` from the
-same checkout so the C and Rust halves stay in sync, then run
-`go test ./...` and `sh clients/go/tools/format_xcheck.sh`.
+The root CMake build builds this core automatically. Cargo uses `--locked`;
+registry packages download on first build. No sibling checkout or prebuilt
+archive is required. CMake accepts `MURMUR_CRSQL_ARCHIVE` as an optional
+explicit override for a matching target-specific bundle.
+
+To build the core alone:
+
+```sh
+python3 tools/build_crsqlite.py --target x86_64-unknown-linux-gnu \
+  --target-dir build/crsqlite-cargo \
+  --output build/crsqlite-linux/libcrsql_bundle_isolated.a
+```
+
+For Windows cross-compilation use `--target x86_64-pc-windows-gnu` with
+`--cc x86_64-w64-mingw32-gcc`, `--nm x86_64-w64-mingw32-nm`, and
+`--objcopy x86_64-w64-mingw32-objcopy`, and a separate target/output directory.
+`LIBCLANG_PATH` may be set to select the installed libclang.
+
+The build isolates Rust-internal symbols with the target's objcopy while
+preserving the C entry points. Generated archives and Cargo output stay under
+`build/`; they are not vendored binaries.
+
+The legacy Makefile can consume the built archive by passing
+`CRSQL_A=build/crsqlite-linux/libcrsql_bundle_isolated.a`.

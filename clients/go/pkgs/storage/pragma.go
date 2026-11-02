@@ -152,7 +152,7 @@ func RegisterExtensionPragma(fn ExtensionPragma) {
 
 func (e *Engine) murmurPragma(name string, value *string, readOnly bool) (int, string) {
 	switch name {
-	case "murmur_kdf", "murmur_kdf_time", "murmur_kdf_memory_kib", "murmur_kdf_threads":
+	case "murmur_kdf", "murmur_scrypt_n", "murmur_scrypt_r", "murmur_scrypt_p":
 		return e.pragmaKDF(name, value, readOnly)
 	}
 	if extensionPragma != nil {
@@ -172,41 +172,41 @@ func (e *Engine) pragmaKDF(name string, value *string, readOnly bool) (int, stri
 			e.mu.Lock()
 			k := e.ring.KDF
 			e.mu.Unlock()
-			if k == KDFArgon2ID {
-				current = "argon2id"
+			if k == KDFScrypt {
+				current = "scrypt"
 			} else {
 				current = "direct"
 			}
-		} else if kdf == KDFArgon2ID {
-			current = "argon2id"
+		} else if kdf == KDFScrypt {
+			current = "scrypt"
 		} else {
 			current = "direct"
 		}
 		param = KeyringParamKDF
-	case "murmur_kdf_time":
+	case "murmur_scrypt_n":
 		if sealed {
 			e.mu.Lock()
-			time = e.ring.ArgonTime
+			time = e.ring.ScryptN
 			e.mu.Unlock()
 		}
 		current = utoa(uint64(time))
-		param = KeyringParamTime
-	case "murmur_kdf_memory_kib":
+		param = KeyringParamScryptN
+	case "murmur_scrypt_r":
 		if sealed {
 			e.mu.Lock()
-			mem = e.ring.ArgonMemoryKiB
+			mem = e.ring.ScryptR
 			e.mu.Unlock()
 		}
 		current = utoa(uint64(mem))
-		param = KeyringParamMemory
-	case "murmur_kdf_threads":
+		param = KeyringParamScryptR
+	case "murmur_scrypt_p":
 		if sealed {
 			e.mu.Lock()
-			threads = e.ring.ArgonThreads
+			threads = e.ring.ScryptP
 			e.mu.Unlock()
 		}
 		current = utoa(uint64(threads))
-		param = KeyringParamThreads
+		param = KeyringParamScryptP
 	}
 	if value == nil {
 		return CodeOK, current
@@ -222,16 +222,16 @@ func (e *Engine) pragmaKDF(name string, value *string, readOnly bool) (int, stri
 		switch strings.ToLower(*value) {
 		case "direct":
 			v = KDFDirectHKDF
-		case "argon2id":
-			v = KDFArgon2ID
+		case "scrypt":
+			v = KDFScrypt
 		default:
-			return CodeError, "murmur_kdf must be direct or argon2id"
+			return CodeError, "murmur_kdf must be direct or scrypt"
 		}
 		if rc := e.SetParam(param, v, readOnly); rc != CodeOK {
 			return rc, ""
 		}
-		if v == KDFArgon2ID {
-			return CodeOK, "argon2id"
+		if v == KDFScrypt {
+			return CodeOK, "scrypt"
 		}
 		return CodeOK, "direct"
 	}
@@ -247,9 +247,9 @@ func (e *Engine) pragmaKDF(name string, value *string, readOnly bool) (int, stri
 	}
 	_, t, m, th := e.StagedKDF()
 	switch param {
-	case KeyringParamTime:
+	case KeyringParamScryptN:
 		return CodeOK, utoa(uint64(t))
-	case KeyringParamMemory:
+	case KeyringParamScryptR:
 		return CodeOK, utoa(uint64(m))
 	default:
 		return CodeOK, utoa(uint64(th))
@@ -337,10 +337,8 @@ func (e *Engine) pragmaCipher(value *string, readOnly, locked bool) (int, string
 		switch {
 		case strings.EqualFold(*value, "aes256gcm"):
 			c = CipherAES256GCM
-		case strings.EqualFold(*value, "aegis256"):
-			c = CipherAEGIS256
 		default:
-			return CodeError, "cipher must be aes256gcm or aegis256"
+			return CodeError, "cipher must be aes256gcm"
 		}
 		if rc := e.SetCipher(c, readOnly, locked); rc != CodeOK {
 			if rc == CodeBusy {

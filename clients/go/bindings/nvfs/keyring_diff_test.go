@@ -221,13 +221,13 @@ func TestKeyringDiffErrors(t *testing.T) {
 		t.Fatalf("go truncated = %v, want ErrCorrupt", err)
 	}
 
-	// Argon2 header + garbage: real KDF runs, then Auth.
+	// Legacy Argon2id headers are rejected before password derivation.
 	ahdr := mustHex(t, vec_argon2_hdrHex)
-	if _, rc := nvfs.KrTestOpen(ahdr, nil, []byte("pass"), store[:], context[:]); rc != krAuth {
-		t.Fatalf("cpp argon2 garbage = %d, want AUTH", rc)
+	if _, rc := nvfs.KrTestOpen(ahdr, nil, []byte("pass"), store[:], context[:]); rc != krCorrupt {
+		t.Fatalf("cpp legacy Argon2id = %d, want CORRUPT", rc)
 	}
 
-	// Zero Argon2 params: fail fast with Corrupt (no KDF).
+	// Zero scrypt params: fail fast with Corrupt (no KDF).
 	azero := mustHex(t, vec_argon2_zeroparamsHex)
 	if _, rc := nvfs.KrTestOpen(azero, nil, []byte("pass"), store[:], context[:]); rc != krCorrupt {
 		t.Fatalf("cpp argon2 zero params = %d, want CORRUPT", rc)
@@ -258,7 +258,7 @@ func krSealKeys(t *testing.T, kdf uint8, seq uint64, sid, ctx, wrap, master, pas
 func compareRings(t *testing.T, what string, g *storage.Keyring, f krFlat) {
 	t.Helper()
 	if g.Seq != f.seq || g.KDF != f.kdf || g.Current != f.current ||
-		g.ArgonTime != f.atime || g.ArgonMemoryKiB != f.amem || g.ArgonThreads != f.athreads ||
+		g.ScryptN != f.atime || g.ScryptR != f.amem || g.ScryptP != f.athreads ||
 		!bytes.Equal(g.WrapID, f.wrap) || len(g.Keys) != len(f.keys) {
 		t.Fatalf("%s: header diverge (go=%+v cpp=%+v)", what, g, f)
 	}
@@ -320,36 +320,36 @@ func TestKeyringDiffRoundTrip(t *testing.T) {
 	}
 	g2.Wipe()
 
-	// Argon2 both directions (small params: t=1, m=64 KiB, th=2).
+	// scrypt both directions (small params: N=16, r=8, p=2).
 	pass := []byte("correct horse battery staple")
 	aenv, err := storage.Create(storage.CreateOptions{
-		KDF: 1, ArgonTime: 1, ArgonMemoryKiB: 64, ArgonThreads: 2,
+		KDF: storage.KDFScrypt, ScryptN: 16, ScryptR: 8, ScryptP: 2,
 		StoreID: sid, ContextID: ctx, Passphrase: pass,
 	})
 	if err != nil {
-		t.Fatalf("go argon2 create: %v", err)
+		t.Fatalf("go scrypt create: %v", err)
 	}
 	ga, err := storage.Open(aenv, nil, pass, sid, ctx)
 	if err != nil {
-		t.Fatalf("go argon2 open: %v", err)
+		t.Fatalf("go scrypt open: %v", err)
 	}
 	flata, rc := nvfs.KrTestOpen(aenv, nil, pass, sid[:], ctx[:])
 	if rc != krOK {
-		t.Fatalf("cpp open go-argon2 = %d", rc)
+		t.Fatalf("cpp open go-scrypt = %d", rc)
 	}
-	compareRings(t, "go-argon2", ga, parseFlat(t, flata))
+	compareRings(t, "go-scrypt", ga, parseFlat(t, flata))
 	ga.Wipe()
-	cenvA := krSealKeys(t, 1, 1, sid[:], ctx[:], nil, nil, pass, 1, 64, 2,
+	cenvA := krSealKeys(t, storage.KDFScrypt, 1, sid[:], ctx[:], nil, nil, pass, 16, 8, 2,
 		[]krFlatKey{{id: 1, active: true, key: k1}})
 	ga2, err := storage.Open(cenvA, nil, pass, sid, ctx)
 	if err != nil {
-		t.Fatalf("go open cpp-argon2: %v", err)
+		t.Fatalf("go open cpp-scrypt: %v", err)
 	}
 	flatA2, rc := nvfs.KrTestOpen(cenvA, nil, pass, sid[:], ctx[:])
 	if rc != krOK {
-		t.Fatalf("cpp open cpp-argon2 = %d", rc)
+		t.Fatalf("cpp open cpp-scrypt = %d", rc)
 	}
-	compareRings(t, "cpp-argon2", ga2, parseFlat(t, flatA2))
+	compareRings(t, "cpp-scrypt", ga2, parseFlat(t, flatA2))
 	ga2.Wipe()
 }
 

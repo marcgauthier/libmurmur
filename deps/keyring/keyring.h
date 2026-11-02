@@ -1,15 +1,8 @@
-/* keys.enc v3 keyring envelope: C++ port of pkgs/storage/keyring.go.
- *
- * Byte-identical protector derivation (HKDF-SHA256, Argon2id +
- * HKDF-SHA256), envelope layout ("SPLK" magic, CRC32-Castagnoli
- * header checksum, AES-256-GCM body), and error taxonomy (auth /
- * corrupt / misuse). Pinned by the Go differential test
- * (bindings/nvfs/keyring_diff_test.go) against the Go implementation
- * and the sqlite-murmur fixed vectors.
- *
- * Robustness note: hostile envelopes (e.g. Argon2 threads=255) fail
- * closed with CORRUPT here; the Go implementation can panic inside
- * x/crypto on the same inputs. Fail-closed is the intended behavior.
+/* SPLK v3 keyring: direct HKDF-SHA256 or AWS-LC scrypt + HKDF-SHA256,
+ * CRC32C-checked header layout and AES-256-GCM authenticated body.
+ * KDF ID 1 (legacy Argon2id) is rejected; scrypt uses distinct ID 2.
+ * Password derivation validates bounded N/r/p costs before allocation.
+ * C/Go differential tests cover keyring compatibility.
  */
 #ifndef MURMUR_KEYRING_H
 #define MURMUR_KEYRING_H
@@ -21,10 +14,10 @@
 extern "C" {
 #endif
 
-/* KDF ids match the Go KDFDirectHKDF/KDFArgon2ID. */
+/* KDF IDs: 1 is reserved for the removed Argon2id implementation. */
 enum {
   MURMUR_KDF_DIRECT = 0,
-  MURMUR_KDF_ARGON2ID = 1,
+  MURMUR_KDF_SCRYPT = 2,
 };
 
 /* Result codes. */
@@ -46,9 +39,9 @@ typedef struct {
 typedef struct {
   uint64_t seq;
   uint8_t kdf;
-  uint32_t argon_time;
-  uint32_t argon_mem_kib;
-  uint8_t argon_threads;
+  uint32_t scrypt_n;
+  uint32_t scrypt_r;
+  uint8_t scrypt_p;
   uint8_t context[16];
   uint8_t *wrap_id;
   size_t wrap_len;
@@ -68,8 +61,8 @@ murmur_keyring_t *murmur_kr_open(const uint8_t *env, size_t env_len,
                                  const uint8_t context_id[16], int *rc);
 
 /* Seals a fresh single-key envelope (id 1, seq 1), mirroring Create. */
-int murmur_kr_create(uint8_t kdf, uint32_t argon_time, uint32_t argon_mem_kib,
-                     uint8_t argon_threads, const uint8_t *wrap_id,
+int murmur_kr_create(uint8_t kdf, uint32_t scrypt_n, uint32_t scrypt_r,
+                     uint8_t scrypt_p, const uint8_t *wrap_id,
                      size_t wrap_len, const uint8_t store_id[16],
                      const uint8_t context_id[16], const uint8_t *master,
                      size_t master_len, const uint8_t *pass, size_t pass_len,
@@ -108,8 +101,8 @@ int murmur_kr_open_flat(const uint8_t *env, size_t env_len,
                         uint8_t **out_flat, size_t *out_len);
 int murmur_kr_seal_flat(uint8_t kdf, uint64_t seq, const uint8_t store_id[16],
                         const uint8_t context_id[16], const uint8_t *wrap_id,
-                        size_t wrap_len, uint32_t argon_time,
-                        uint32_t argon_mem_kib, uint8_t argon_threads,
+                        size_t wrap_len, uint32_t scrypt_n,
+                        uint32_t scrypt_r, uint8_t scrypt_p,
                         const uint8_t *master, size_t master_len,
                         const uint8_t *pass, size_t pass_len,
                         const uint8_t *flat_keys, size_t nkeys,

@@ -179,7 +179,7 @@ func TestRekeyDirFaultResume(t *testing.T) {
 	}
 }
 
-func TestRekeyDirArgon2(t *testing.T) {
+func TestRekeyDirScrypt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	oldM, newM := dirKey(0x20), dirKey(0x40)
 	e, err := OpenDir(dir, oldM, true)
@@ -190,16 +190,16 @@ func TestRekeyDirArgon2(t *testing.T) {
 	if err := e.WriteAt(payload, 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
-	if rc := e.SetParam(KeyringParamTime, 1, false); rc != CodeOK {
+	if rc := e.SetParam(KeyringParamScryptN, 16, false); rc != CodeOK {
 		t.Fatalf("stage time: %d", rc)
 	}
-	if rc := e.SetParam(KeyringParamMemory, 1024, false); rc != CodeOK {
+	if rc := e.SetParam(KeyringParamScryptR, 8, false); rc != CodeOK {
 		t.Fatalf("stage memory: %d", rc)
 	}
-	if rc := e.SetParam(KeyringParamThreads, 1, false); rc != CodeOK {
+	if rc := e.SetParam(KeyringParamScryptP, 1, false); rc != CodeOK {
 		t.Fatalf("stage threads: %d", rc)
 	}
-	if rc := e.SetParam(KeyringParamKDF, KDFArgon2ID, false); rc != CodeOK {
+	if rc := e.SetParam(KeyringParamKDF, KDFScrypt, false); rc != CodeOK {
 		t.Fatalf("seal argon2: %d", rc)
 	}
 	if err := e.WriteAt(payload, 0); err != nil {

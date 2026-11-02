@@ -60,9 +60,9 @@ enum {
 // Keyring params mirror sqlite_murmur_keyring_args.
 enum {
   NV_CTL_PARAM_KDF = 1,
-  NV_CTL_PARAM_TIME = 2,
-  NV_CTL_PARAM_MEMORY = 3,
-  NV_CTL_PARAM_THREADS = 4
+  NV_CTL_PARAM_SCRYPT_N = 2,
+  NV_CTL_PARAM_SCRYPT_R = 3,
+  NV_CTL_PARAM_SCRYPT_P = 4
 };
 
 // nvCtlSetDefaults captures VFS-level open defaults at

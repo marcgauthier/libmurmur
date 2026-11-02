@@ -2,7 +2,7 @@
 //
 // The engine is a BlockStore: SQLite's VFS reads and writes plaintext
 // bytes, and the engine encrypts each 4096-byte block with the page AEAD
-// (AES-256-GCM or AEGIS-256) before persisting it. Records use the
+// (AES-256-GCM) before persisting it. Records use the
 // EXP1-EXP4 envelopes shared with sqlite-murmur.
 //
 // Directory engines persist through RocksDB with a byte-identical
@@ -45,12 +45,12 @@ const (
 )
 
 // Keyring params mirror sqlite_murmur_keyring_args. KDF selectors and
-// Argon2 defaults live in keyring.go.
+// scrypt defaults live in keyring.go.
 const (
 	KeyringParamKDF     = 1
-	KeyringParamTime    = 2
-	KeyringParamMemory  = 3
-	KeyringParamThreads = 4
+	KeyringParamScryptN = 2
+	KeyringParamScryptR = 3
+	KeyringParamScryptP = 4
 )
 
 // CachePagesDefault bounds the plaintext page cache.
@@ -110,10 +110,10 @@ type Engine struct {
 	bgThreads     uint32
 	rocksSync     bool
 
-	stagedKDF     uint8
-	stagedTime    uint32
-	stagedMemory  uint32
-	stagedThreads uint8
+	stagedKDF uint8
+	stagedN   uint32
+	stagedR   uint32
+	stagedP   uint8
 
 	size          uint64
 	committedSize uint64
@@ -184,9 +184,9 @@ func newEngine(rec recordStore, key [32]byte, cap int) *Engine {
 		flushDone:     make(chan struct{}),
 		bgThreads:     uint32(runtime.NumCPU()),
 		stagedKDF:     KDFDirectHKDF,
-		stagedTime:    ArgonTimeDefault,
-		stagedMemory:  ArgonMemoryKiBDefault,
-		stagedThreads: ArgonThreadsDefault,
+		stagedN:       ScryptNDefault,
+		stagedR:       ScryptRDefault,
+		stagedP:       ScryptPDefault,
 		cache:         map[uint64]*list.Element{},
 		lru:           list.New(),
 		cap:           cap,
@@ -997,7 +997,7 @@ func (e *Engine) Sealed() bool {
 func (e *Engine) StagedKDF() (kdf uint8, time, mem uint32, threads uint8) {
 	e.mu.Lock()
 	live, handle := e.live, e.handle
-	k, t, m, th := e.stagedKDF, e.stagedTime, e.stagedMemory, e.stagedThreads
+	k, t, m, th := e.stagedKDF, e.stagedN, e.stagedR, e.stagedP
 	e.mu.Unlock()
 	if live {
 		if st, rc := nvfs.StoreKdf(handle); rc == CodeOK {
@@ -1024,7 +1024,7 @@ func (e *Engine) RingParams() (kdf uint8, time, mem uint32, threads uint8, seale
 	if ring == nil {
 		return 0, 0, 0, 0, false
 	}
-	return ring.KDF, ring.ArgonTime, ring.ArgonMemoryKiB, ring.ArgonThreads, true
+	return ring.KDF, ring.ScryptN, ring.ScryptR, ring.ScryptP, true
 }
 
 // RocksSync reports the per-batch sync setting.
@@ -1082,13 +1082,13 @@ func (e *Engine) SetParam(param int, value uint64, readOnly bool) int {
 	var ok bool
 	switch param {
 	case KeyringParamKDF:
-		ok = value <= 1
-	case KeyringParamTime:
+		ok = value == KDFDirectHKDF || value == KDFScrypt
+	case KeyringParamScryptN:
+		ok = value >= 2 && value <= 1<<20 && value&(value-1) == 0
+	case KeyringParamScryptR:
 		ok = value >= 1 && value <= 32
-	case KeyringParamMemory:
-		ok = value >= 1024 && value <= 16777216
-	case KeyringParamThreads:
-		ok = value >= 1 && value <= 32
+	case KeyringParamScryptP:
+		ok = value >= 1 && value <= 16
 	default:
 		return CodeMisuse
 	}
@@ -1104,14 +1104,14 @@ func (e *Engine) SetParam(param int, value uint64, readOnly bool) int {
 		return CodeBusy
 	}
 	switch param {
-	case KeyringParamTime:
-		e.stagedTime = uint32(value)
+	case KeyringParamScryptN:
+		e.stagedN = uint32(value)
 		return CodeOK
-	case KeyringParamMemory:
-		e.stagedMemory = uint32(value)
+	case KeyringParamScryptR:
+		e.stagedR = uint32(value)
 		return CodeOK
-	case KeyringParamThreads:
-		e.stagedThreads = uint8(value)
+	case KeyringParamScryptP:
+		e.stagedP = uint8(value)
 		return CodeOK
 	}
 	return e.sealLocked(uint8(value))
@@ -1130,15 +1130,15 @@ func (e *Engine) sealLocked(kdf uint8) int {
 		e.hasSID = true
 	}
 	co := CreateOptions{
-		KDF:            kdf,
-		ArgonTime:      e.stagedTime,
-		ArgonMemoryKiB: e.stagedMemory,
-		ArgonThreads:   e.stagedThreads,
-		StoreID:        e.storeID,
-		ContextID:      e.storeID,
+		KDF:       kdf,
+		ScryptN:   e.stagedN,
+		ScryptR:   e.stagedR,
+		ScryptP:   e.stagedP,
+		StoreID:   e.storeID,
+		ContextID: e.storeID,
 	}
 	if kdf == KDFDirectHKDF {
-		co.ArgonTime, co.ArgonMemoryKiB, co.ArgonThreads = 0, 0, 0
+		co.ScryptN, co.ScryptR, co.ScryptP = 0, 0, 0
 		co.Master = e.master[:]
 	} else {
 		co.Passphrase = e.master[:]
@@ -1390,11 +1390,11 @@ func (e *Engine) InventoryJSON() string {
 	}
 	r := e.ring
 	kdf := "direct"
-	if r.KDF == KDFArgon2ID {
-		kdf = "argon2id"
+	if r.KDF == KDFScrypt {
+		kdf = "scrypt"
 	}
 	out := `{"sealed":true,"seq":` + utoa(r.Seq) + `,"kdf":"` + kdf + `",`
-	out += `"kdf_time":` + utoa(uint64(r.ArgonTime)) + `,"kdf_memory_kib":` + utoa(uint64(r.ArgonMemoryKiB)) + `,"kdf_threads":` + utoa(uint64(r.ArgonThreads)) + `,`
+	out += `"scrypt_n":` + utoa(uint64(r.ScryptN)) + `,"scrypt_r":` + utoa(uint64(r.ScryptR)) + `,"scrypt_p":` + utoa(uint64(r.ScryptP)) + `,`
 	out += `"wrap_id":"` + jsonEscape(r.WrapID) + `",`
 	out += `"current":` + utoa(uint64(r.Current)) + `,"keys":[`
 	for i, ent := range r.Keys {
@@ -1452,6 +1452,9 @@ func jsonEscape(input []byte) string {
 // an empty database outside a transaction; locked reports whether any
 // connection currently holds a lock on this store.
 func (e *Engine) SetCipher(c Cipher, readOnly, locked bool) int {
+	if c != CipherAES256GCM {
+		return CodeMisuse
+	}
 	if readOnly {
 		return CodeReadOnly
 	}

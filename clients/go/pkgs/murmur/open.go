@@ -94,7 +94,7 @@ func execPragma(db *sqlite.Conn, name, value string) int {
 }
 
 func validCipherToken(s string) bool {
-	return s == "aes256gcm" || s == "aegis256"
+	return s == "aes256gcm"
 }
 
 func validCompressToken(s string) bool {

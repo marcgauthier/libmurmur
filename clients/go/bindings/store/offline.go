@@ -34,7 +34,7 @@ func VerifyBackup(path string, key [32]byte) error {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("invalid backup manifest trailing content")
 	}
-	if manifest.Version != 1 || (manifest.Cipher != "aes256gcm" && manifest.Cipher != "aegis256") {
+	if manifest.Version != 1 || manifest.Cipher != "aes256gcm" {
 		return fmt.Errorf("unsupported native backup manifest")
 	}
 	for _, id := range []string{manifest.Group, manifest.Node} {

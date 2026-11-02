@@ -1,7 +1,7 @@
 // krflat.h - shared keyring-envelope trial open for open.cc
 // (provision/seal) and offline.cc (rekey/verify). Ports Go
 // openRekeyRing (dir.go): try the master as a direct master, then
-// as Argon2 passphrase bytes, against murmur_kr_open_flat.
+// as scrypt passphrase bytes, against murmur_kr_open_flat.
 #ifndef MURMUR_KRFLAT_H
 #define MURMUR_KRFLAT_H
 
@@ -181,14 +181,14 @@ inline void krflat_inventory_json(const KrFlatRing *r, std::string *js) {
   snprintf(num, sizeof(num), "%llu", (unsigned long long)r->seq);
   *js += num;
   *js += ",\"kdf\":\"";
-  *js += (r->kdf == 1 ? "argon2id" : "direct");
-  *js += "\",\"kdf_time\":";
+  *js += (r->kdf == 1 ? "scrypt" : "direct");
+  *js += "\",\"scrypt_n\":";
   snprintf(num, sizeof(num), "%u", r->time);
   *js += num;
-  *js += ",\"kdf_memory_kib\":";
+  *js += ",\"scrypt_r\":";
   snprintf(num, sizeof(num), "%u", r->mem);
   *js += num;
-  *js += ",\"kdf_threads\":";
+  *js += ",\"scrypt_p\":";
   snprintf(num, sizeof(num), "%u", r->threads);
   *js += num;
   *js += ",\"wrap_id\":\"";

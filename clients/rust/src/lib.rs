@@ -74,7 +74,7 @@ impl Client {
                 sqlite3_close(db); return Err(e);
             }
             let client = Self { db };
-            client.exec("PRAGMA cipher='aegis256'; PRAGMA compression='zstd3'; PRAGMA flush_interval_ms=100;")?;
+            client.exec("PRAGMA cipher='aes256gcm'; PRAGMA compression='zstd3'; PRAGMA flush_interval_ms=100;")?;
             check(db, "murmur_crsqlite_init", murmur_crsqlite_init(db))?;
             Ok(client)
         }

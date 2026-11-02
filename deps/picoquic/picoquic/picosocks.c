@@ -25,6 +25,12 @@
 #include <fcntl.h>
 #endif
 
+#ifdef _WINDOWS
+typedef WSACMSGHDR picoquic_cmsghdr_t;
+#else
+typedef struct cmsghdr picoquic_cmsghdr_t;
+#endif
+
 int picoquic_bind_to_address(SOCKET_TYPE fd, int af, int port, const struct sockaddr* local_addr)
 {
     struct sockaddr_storage sa;
@@ -376,7 +382,7 @@ void picoquic_socks_cmsg_parse(
     size_t * udp_coalesced_size)
 {
     /* Assume that msg has been filled by a call to recvmsg */
-    struct cmsghdr* cmsg;
+    picoquic_cmsghdr_t* cmsg;
     WSAMSG* msg = (WSAMSG*)vmsg;
 
     /* Get the control information */
@@ -463,7 +469,7 @@ void picoquic_socks_cmsg_parse(
     /* Assume that msg has been filled by a call to recvmsg */
     /* Get the control information */
     struct msghdr* msg = (struct msghdr*)vmsg;
-    struct cmsghdr* cmsg;
+    picoquic_cmsghdr_t* cmsg;
 
     for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL; cmsg = CMSG_NXTHDR(msg, cmsg)) {
         if (cmsg->cmsg_level == IPPROTO_IP) {
@@ -530,7 +536,7 @@ void picoquic_socks_cmsg_parse(
 }
 
 #ifdef _WINDOWS
-static void* cmsg_format_header_return_data_ptr(WSAMSG* msg, struct cmsghdr** last_cmsg, int * control_length,
+static void* cmsg_format_header_return_data_ptr(WSAMSG* msg, picoquic_cmsghdr_t** last_cmsg, int * control_length,
     INT cmsg_level, INT cmsg_type, size_t cmsg_data_len)
 {
     void* cmsg_data_ptr = NULL;
@@ -550,15 +556,15 @@ static void* cmsg_format_header_return_data_ptr(WSAMSG* msg, struct cmsghdr** la
     return cmsg_data_ptr;
 }
 #else
-static void* cmsg_format_header_return_data_ptr(struct msghdr* msg, struct cmsghdr** last_cmsg, int* control_length,
+static void* cmsg_format_header_return_data_ptr(struct msghdr* msg, picoquic_cmsghdr_t** last_cmsg, int* control_length,
     int cmsg_level, int cmsg_type, size_t cmsg_data_len)
 {
     void* cmsg_data_ptr = NULL;
 #ifdef CMSG_ALIGN
-    struct cmsghdr* cmsg = (*last_cmsg == NULL) ? CMSG_FIRSTHDR(msg) :
-        (struct cmsghdr*)((unsigned char*)(*last_cmsg) + CMSG_ALIGN((*last_cmsg)->cmsg_len));
+    picoquic_cmsghdr_t* cmsg = (*last_cmsg == NULL) ? CMSG_FIRSTHDR(msg) :
+        (picoquic_cmsghdr_t*)((unsigned char*)(*last_cmsg) + CMSG_ALIGN((*last_cmsg)->cmsg_len));
 #else
-    struct cmsghdr* cmsg = (*last_cmsg == NULL) ? CMSG_FIRSTHDR(msg) : CMSG_NXTHDR(msg, *last_cmsg);
+    picoquic_cmsghdr_t* cmsg = (*last_cmsg == NULL) ? CMSG_FIRSTHDR(msg) : CMSG_NXTHDR(msg, *last_cmsg);
 #endif
 
     if (cmsg != NULL) {
@@ -586,7 +592,7 @@ void picoquic_socks_cmsg_format(
 {
     WSAMSG* msg = (WSAMSG*)vmsg;
     int control_length = 0;
-    struct cmsghdr* last_cmsg = NULL;
+    picoquic_cmsghdr_t* last_cmsg = NULL;
     int is_null = 0;
     /* Format the control message */
     if (addr_from != NULL && addr_from->sa_family != 0) {
@@ -691,7 +697,7 @@ void picoquic_socks_cmsg_format(
 {
     struct msghdr* msg = (struct msghdr*)vmsg;
     int control_length = 0;
-    struct cmsghdr* last_cmsg = NULL;
+    picoquic_cmsghdr_t* last_cmsg = NULL;
     int is_null = 0;
 
     if (addr_from != NULL && addr_from->sa_family != 0) {

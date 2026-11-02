@@ -147,8 +147,6 @@ func rekeyDirGo(dir string, oldMaster, newMaster [32]byte, faultAfter int) (rc i
 	cipher := CipherAES256GCM
 	if val, found, err := nvGet(db, []byte(MetaCipher)); err == nil && found {
 		switch string(val) {
-		case "aegis256":
-			cipher = CipherAEGIS256
 		case "aes256gcm":
 		default:
 			return CodeCorrupt
@@ -179,15 +177,15 @@ func rekeyDirGo(dir string, oldMaster, newMaster [32]byte, faultAfter int) (rc i
 		staged = val
 	} else {
 		co := CreateOptions{
-			KDF:            oldRing.KDF,
-			ArgonTime:      oldRing.ArgonTime,
-			ArgonMemoryKiB: oldRing.ArgonMemoryKiB,
-			ArgonThreads:   oldRing.ArgonThreads,
-			WrapID:         oldRing.WrapID,
-			StoreID:        storeID,
-			ContextID:      storeID,
+			KDF:       oldRing.KDF,
+			ScryptN:   oldRing.ScryptN,
+			ScryptR:   oldRing.ScryptR,
+			ScryptP:   oldRing.ScryptP,
+			WrapID:    oldRing.WrapID,
+			StoreID:   storeID,
+			ContextID: storeID,
 		}
-		if oldRing.KDF == KDFArgon2ID {
+		if oldRing.KDF == KDFScrypt {
 			co.Passphrase = newMaster[:]
 		} else {
 			co.Master = newMaster[:]
@@ -304,7 +302,7 @@ func snapshotRing(master [32]byte, ring *Keyring) pageKeys {
 }
 
 // openRekeyRing opens an envelope with a master pair: direct rings use
-// it as the master, Argon2 rings as passphrase bytes.
+// it as the master, scrypt rings as passphrase bytes.
 func openRekeyRing(env []byte, master [32]byte, storeID [16]byte) (*Keyring, error) {
 	if ring, err := Open(env, master[:], nil, storeID, storeID); err == nil {
 		return ring, nil
@@ -331,8 +329,6 @@ func verifyDirGo(dir string, master [32]byte) int {
 	cipher := CipherAES256GCM
 	if val, found, err := nvGet(db, []byte(MetaCipher)); err == nil && found {
 		switch string(val) {
-		case "aegis256":
-			cipher = CipherAEGIS256
 		case "aes256gcm":
 		default:
 			return CodeCorrupt

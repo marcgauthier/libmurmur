@@ -61,7 +61,11 @@ extern "C" {
 #define PTLS_ELEMENTSOF(x) (PTLS_ASSERT_IS_ARRAY_EXPR(x) * sizeof(x) / sizeof((x)[0]))
 
 #ifdef _WINDOWS
+#ifdef __MINGW32__
+#define PTLS_THREADLOCAL __thread
+#else
 #define PTLS_THREADLOCAL __declspec(thread)
+#endif
 #else
 #define PTLS_THREADLOCAL __thread
 #endif

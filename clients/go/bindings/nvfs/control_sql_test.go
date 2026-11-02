@@ -31,7 +31,7 @@ func TestControlPlaneSealViaSQL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seal")
 	db := h.openKeyed(t, path)
-	if got := queryOne(t, db, "PRAGMA murmur_kdf_time='5'"); got != "5" {
+	if got := queryOne(t, db, "PRAGMA murmur_scrypt_n='16'"); got != "16" {
 		t.Fatalf("stage time = %q", got)
 	}
 	if got := queryOne(t, db, "PRAGMA murmur_kdf='direct'"); got != "direct" {
@@ -40,12 +40,12 @@ func TestControlPlaneSealViaSQL(t *testing.T) {
 	if got := queryOne(t, db, "PRAGMA murmur_kdf"); got != "direct" {
 		t.Fatalf("sealed kdf = %q", got)
 	}
-	// Direct-HKDF seals stage no Argon2 params: the sealed header
+	// Direct-HKDF seals stage no scrypt params: the sealed header
 	// reads back zeros, matching reopen decodes.
-	if got := queryOne(t, db, "PRAGMA murmur_kdf_time"); got != "0" {
+	if got := queryOne(t, db, "PRAGMA murmur_scrypt_n"); got != "0" {
 		t.Fatalf("sealed time = %q, want 0", got)
 	}
-	if code := execCode(t, db, "PRAGMA murmur_kdf_time='6'"); code != 5 {
+	if code := execCode(t, db, "PRAGMA murmur_scrypt_n='6'"); code != 5 {
 		t.Fatalf("sealed stage = %d, want BUSY", code)
 	}
 	if err := db.Exec("CREATE TABLE t(a); INSERT INTO t VALUES(42);"); err != nil {
@@ -181,14 +181,14 @@ func TestControlPlaneReadOnlyGuardsViaSQL(t *testing.T) {
 		t.Fatalf("read-only open: %v", err)
 	}
 	defer ro.Close()
-	if code := execCode(t, ro, "PRAGMA cipher='aegis256'"); code != 8 {
+	if code := execCode(t, ro, "PRAGMA cipher='aes256gcm'"); code != 8 {
 		t.Fatalf("ro cipher = %d, want READONLY", code)
 	}
 	if code := execCode(t, ro, "PRAGMA compression='none'"); code != 8 {
 		t.Fatalf("ro compression = %d, want READONLY", code)
 	}
-	if code := execCode(t, ro, "PRAGMA murmur_kdf_time='7'"); code != 8 {
-		t.Fatalf("ro kdf_time = %d, want READONLY", code)
+	if code := execCode(t, ro, "PRAGMA murmur_scrypt_n='7'"); code != 8 {
+		t.Fatalf("ro scrypt_n = %d, want READONLY", code)
 	}
 	if code := execCode(t, ro, "PRAGMA rocksdb_sync='1'"); code != 8 {
 		t.Fatalf("ro rocksdb_sync = %d, want READONLY", code)

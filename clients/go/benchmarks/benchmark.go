@@ -44,7 +44,7 @@ func defaultOptions() options {
 		cachePages:     16384,
 		sqliteCacheKiB: 1048576,
 		pageSize:       4096,
-		cipher:         "aegis256",
+		cipher:         "aes256gcm",
 		compression:    "zstd3",
 		batchSize:      1,
 		ingest:         "local",
@@ -82,7 +82,7 @@ func parseArgs(args []string) options {
 	for _, arg := range args {
 		if arg == "--help" {
 			fmt.Println("Usage: benchmark [--suite=all|no-replication|crsqlite|single] [--seconds=60] [--flush-interval-ms=100] [--cache-pages=16384] [--sqlite-cache-kib=1048576]")
-			fmt.Println("                 [--compression=zstd3|zstd1..zstd22] [--cipher=aegis256|aes256gcm] [--page-size=4096] [--batch-size=1] [--replication=off|on] [--ingest=local|row|blob] [--background-threads=auto|1..256]")
+			fmt.Println("                 [--compression=zstd3|zstd1..zstd22] [--cipher=aes256gcm] [--page-size=4096] [--batch-size=1] [--replication=off|on] [--ingest=local|row|blob] [--background-threads=auto|1..256]")
 			fmt.Println("Default: 8 cases, 60 seconds each. --suite=single supports --backend=murmur|murmurdb|sqlite-disk.")
 			fmt.Println("Batch/replication/ingest/backend overrides require --suite=single; row/blob ingest enables replication; --seconds measures destination active time, excluding source export/packing.")
 			os.Exit(0)
@@ -138,7 +138,7 @@ func parseArgs(args []string) options {
 			}
 		case strings.HasPrefix(arg, "--cipher="):
 			o.cipher = arg[len("--cipher="):]
-			if o.cipher != "aegis256" && o.cipher != "aes256gcm" {
+			if o.cipher != "aes256gcm" {
 				fail(fmt.Errorf("invalid cipher"))
 			}
 		case strings.HasPrefix(arg, "--compression="):

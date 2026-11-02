@@ -7,24 +7,21 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/marcgauthier/libmurmur/clients/go/bindings/aegis"
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 
 // Page-record formats. Layouts mirror the sqlite-murmur wire bytes:
 //
-//	Unkeyed (EXP1/EXP2): magic[4] | flag[1] | nonce | ciphertext
-//	Keyed   (EXP3/EXP4): magic[4] | flag[1] | key id u32le | nonce | ciphertext
+//	Unkeyed (EXP1): magic[4] | flag[1] | nonce | ciphertext
+//	Keyed   (EXP3): magic[4] | flag[1] | key id u32le | nonce | ciphertext
 //
 // flag 0x00 marks a raw page, 0x01 a zstd-compressed page. The page number
 // is covered by the AEAD associated data but is not carried in the record;
 // callers supply it. Nonces are random per seal (12 bytes AES-GCM,
-// 32 bytes AEGIS-256).
+// 32 bytes AES-256-GCM).
 const (
-	HeaderAES        = "EXP1"
-	HeaderAESKeyed   = "EXP3"
-	HeaderAEGIS      = "EXP2"
-	HeaderAEGISKeyed = "EXP4"
+	HeaderAES      = "EXP1"
+	HeaderAESKeyed = "EXP3"
 
 	FlagRaw        = 0x00
 	FlagCompressed = 0x01
@@ -44,7 +41,6 @@ type Cipher uint8
 
 const (
 	CipherAES256GCM   Cipher = 1
-	CipherAEGIS256    Cipher = 2
 	CipherUnspecified Cipher = 255
 )
 
@@ -53,8 +49,6 @@ func CipherName(c Cipher) string {
 	switch c {
 	case CipherAES256GCM:
 		return "aes256gcm"
-	case CipherAEGIS256:
-		return "aegis256"
 	default:
 		return "unspecified"
 	}
@@ -68,7 +62,7 @@ func PageKey(page uint64) [9]byte {
 	return out
 }
 
-// RecordKeyID peeks the data-key id of a keyed (EXP3/EXP4) record. It
+// RecordKeyID peeks the data-key id of a keyed (EXP3) record. It
 // reports false for legacy and corrupt records; callers route those
 // through the legacy trial chain.
 func RecordKeyID(record []byte) (uint32, bool) {
@@ -76,29 +70,22 @@ func RecordKeyID(record []byte) (uint32, bool) {
 		return 0, false
 	}
 	exp3 := string(record[:4]) == HeaderAESKeyed
-	exp4 := string(record[:4]) == HeaderAEGISKeyed
-	if !exp3 && !exp4 {
+	if !exp3 {
 		return 0, false
 	}
 	if exp3 && len(record) < 4+1+4+AESGCMNonceLen+AESGCMTagLen {
 		return 0, false
 	}
-	if exp4 && len(record) < 4+1+4+aegis.NonceLen+aegis.TagLen {
-		return 0, false
-	}
 	return binary.LittleEndian.Uint32(record[5:9]), true
 }
 
-// IsLegacyRecord positively identifies unkeyed (EXP1/EXP2) records.
+// IsLegacyRecord positively identifies unkeyed (EXP1) records.
 func IsLegacyRecord(record []byte) bool {
 	if len(record) < 4 {
 		return false
 	}
 	if string(record[:4]) == HeaderAES {
 		return len(record) >= 4+1+AESGCMNonceLen+AESGCMTagLen
-	}
-	if string(record[:4]) == HeaderAEGIS {
-		return len(record) >= 5+aegis.NonceLen+aegis.TagLen
 	}
 	return false
 }
@@ -117,23 +104,8 @@ func aesAAD(flag byte, page uint64, keyID *uint32) []byte {
 	return aad
 }
 
-func aegisAAD(magic string, flag byte, page uint64, keyID *uint32) []byte {
-	aad := make([]byte, 0, 17)
-	aad = append(aad, magic...)
-	aad = append(aad, flag)
-	var p [8]byte
-	binary.BigEndian.PutUint64(p[:], page)
-	aad = append(aad, p[:]...)
-	if keyID != nil {
-		var id [4]byte
-		binary.LittleEndian.PutUint32(id[:], *keyID)
-		aad = append(aad, id[:]...)
-	}
-	return aad
-}
-
 // Encrypt seals one page payload. keyID 0 selects the legacy unkeyed
-// formats (EXP1/EXP2); nonzero selects the sealed formats (EXP3/EXP4).
+// formats (EXP1); nonzero selects the sealed formats (EXP3).
 // data must already be compressed when compressed is set.
 func Encrypt(c Cipher, key [32]byte, page uint64, data []byte, compressed bool, keyID uint32) ([]byte, error) {
 	if len(data) > 0x7fffffff {
@@ -171,22 +143,6 @@ func encryptUnkeyed(c Cipher, key [32]byte, page uint64, data []byte, compressed
 		out = append(out, nonce[:]...)
 		out = append(out, sealed...)
 		return out, nil
-	case CipherAEGIS256:
-		var nonce [aegis.NonceLen]byte
-		if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
-			return nil, err
-		}
-		sealed := make([]byte, len(data)+aegis.TagLen)
-		out, err := aegis.Encrypt(sealed, data, aegisAAD(HeaderAEGIS, flag, page, nil), nonce, key)
-		if err != nil {
-			return nil, err
-		}
-		rec := make([]byte, 0, 5+aegis.NonceLen+len(out))
-		rec = append(rec, HeaderAEGIS...)
-		rec = append(rec, flag)
-		rec = append(rec, nonce[:]...)
-		rec = append(rec, out...)
-		return rec, nil
 	default:
 		return nil, ErrMisuse
 	}
@@ -221,25 +177,6 @@ func encryptKeyed(c Cipher, key [32]byte, page uint64, data []byte, compressed b
 		out = append(out, nonce[:]...)
 		out = append(out, sealed...)
 		return out, nil
-	case CipherAEGIS256:
-		var nonce [aegis.NonceLen]byte
-		if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
-			return nil, err
-		}
-		sealed := make([]byte, len(data)+aegis.TagLen)
-		out, err := aegis.Encrypt(sealed, data, aegisAAD(HeaderAEGISKeyed, flag, page, &keyID), nonce, key)
-		if err != nil {
-			return nil, err
-		}
-		rec := make([]byte, 0, 9+aegis.NonceLen+len(out))
-		var id [4]byte
-		binary.LittleEndian.PutUint32(id[:], keyID)
-		rec = append(rec, HeaderAEGISKeyed...)
-		rec = append(rec, flag)
-		rec = append(rec, id[:]...)
-		rec = append(rec, nonce[:]...)
-		rec = append(rec, out...)
-		return rec, nil
 	default:
 		return nil, ErrMisuse
 	}
@@ -303,52 +240,14 @@ func decryptAESToPlain(key [32]byte, keyed bool, page uint64, record []byte) (bo
 	return flag != 0, plain, nil
 }
 
-func decryptAEGISToPlain(key [32]byte, keyed bool, page uint64, record []byte) (bool, []byte, error) {
-	headerLen := 5
-	magic := HeaderAEGIS
-	if keyed {
-		headerLen = 9
-		magic = HeaderAEGISKeyed
-	}
-	overhead := headerLen + aegis.NonceLen + aegis.TagLen
-	if len(record) < overhead || string(record[:4]) != magic {
-		return false, nil, ErrCorrupt
-	}
-	flag := record[4]
-	var keyID *uint32
-	if keyed {
-		id := binary.LittleEndian.Uint32(record[5:9])
-		keyID = &id
-	}
-	payloadSize := len(record) - overhead
-	if flag > 1 || payloadSize > zstd.CompressBound(Block) {
-		return false, nil, ErrCorrupt
-	}
-	var nonce [aegis.NonceLen]byte
-	copy(nonce[:], record[headerLen:headerLen+aegis.NonceLen])
-	plain := make([]byte, payloadSize)
-	out, err := aegis.Decrypt(plain, record[headerLen+aegis.NonceLen:], aegisAAD(magic, flag, page, keyID), nonce, key)
-	if err != nil {
-		return false, nil, ErrAuth
-	}
-	return flag != 0, out, nil
-}
-
 // Decrypt opens one page record into a fresh block. It dispatches on magic
-// (EXP3/EXP4 go keyed); unknown magic fails closed. Authentication,
+// (EXP3 go keyed); unknown magic fails closed. Authentication,
 // bounds, flag, size, and decompression failures all fail closed.
 func Decrypt(c Cipher, key [32]byte, page uint64, record []byte) ([]byte, error) {
 	switch c {
 	case CipherAES256GCM:
 		keyed := len(record) >= 4 && string(record[:4]) == HeaderAESKeyed
 		compressed, plain, err := decryptAESToPlain(key, keyed, page, record)
-		if err != nil {
-			return nil, err
-		}
-		return finishDecrypt(compressed, plain)
-	case CipherAEGIS256:
-		keyed := len(record) >= 4 && string(record[:4]) == HeaderAEGISKeyed
-		compressed, plain, err := decryptAEGISToPlain(key, keyed, page, record)
 		if err != nil {
 			return nil, err
 		}

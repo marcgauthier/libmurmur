@@ -152,9 +152,7 @@ int nvOfflineVerify(const char *dir, const uint8_t master[32]) {
   // (Go VerifyDir ignores read errors the same way).
   int cipher = MURMUR_CIPHER_AES256GCM;
   if (meta_get(s, kMetaCipher, &val) == 1) {
-    if (val.size() == 8 && memcmp(val.data(), "aegis256", 8) == 0) {
-      cipher = MURMUR_CIPHER_AEGIS256;
-    } else if (!(val.size() == 9 && memcmp(val.data(), "aes256gcm", 9) == 0)) {
+    if (!(val.size() == 9 && memcmp(val.data(), "aes256gcm", 9) == 0)) {
       code = NV_OFF_CORRUPT;
       goto done;
     }
@@ -258,9 +256,7 @@ int nvOfflineRekey(const char *dir, const uint8_t old_master[32],
   std::vector<uint8_t> val;
   int cipher = MURMUR_CIPHER_AES256GCM;
   if (meta_get(s, kMetaCipher, &val) == 1) {
-    if (val.size() == 8 && memcmp(val.data(), "aegis256", 8) == 0) {
-      cipher = MURMUR_CIPHER_AEGIS256;
-    } else if (!(val.size() == 9 &&
+    if (!(val.size() == 9 &&
                  memcmp(val.data(), "aes256gcm", 9) == 0)) {
       code = NV_OFF_CORRUPT;
       goto done;
@@ -295,7 +291,7 @@ int nvOfflineRekey(const char *dir, const uint8_t old_master[32],
       // Resume: reuse the staged envelope (Go reads it raw).
     } else {
       staged.clear();
-      bool argon = old_ring.kdf == 1;
+      bool argon = old_ring.kdf == MURMUR_KDF_SCRYPT;
       const uint8_t *c_master = argon ? nullptr : new_master;
       const uint8_t *c_pass = argon ? new_master : nullptr;
       const uint8_t *wrap =

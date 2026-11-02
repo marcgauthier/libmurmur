@@ -3,7 +3,7 @@
 Standalone C application linked against the repository's libmurmur.a. It
 registers the Murmur VFS, opens and keys a Murmur store through libmurmur,
 initializes bundled cr-sqlite, marks records as a CRR table, and checks that
-each measured insert creates one tracked change. The run uses AEGIS-256
+each measured insert creates one tracked change. The run uses AES-256-GCM
 encryption, Zstandard level 3 compression, and cr-sqlite CRDT replication;
 these settings are included in the CSV output. The workload is four
 primary-key reads and one insert per operation, matching the sibling

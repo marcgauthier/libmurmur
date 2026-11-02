@@ -102,28 +102,28 @@ func TestEngineCipherSwitch(t *testing.T) {
 	if got := e.CipherName(); got != "aes256gcm" {
 		t.Fatalf("default cipher = %q", got)
 	}
-	if rc := e.SetCipher(CipherAEGIS256, false, false); rc != CodeOK {
+	if rc := e.SetCipher(CipherAES256GCM, false, false); rc != CodeOK {
 		t.Fatalf("switch on empty db = %d", rc)
 	}
-	if got := e.CipherName(); got != "aegis256" {
+	if got := e.CipherName(); got != "aes256gcm" {
 		t.Fatalf("cipher = %q", got)
 	}
-	payload := bytes.Repeat([]byte("aegis page payload "), 256)
+	payload := bytes.Repeat([]byte("AES page payload "), 256)
 	if err := e.WriteAt(payload, 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
 	back := make([]byte, len(payload))
 	if n, err := e.ReadAt(back, 0); err != nil || n != len(payload) || !bytes.Equal(back, payload) {
-		t.Fatalf("aegis round-trip = %d, %v", n, err)
+		t.Fatalf("AES round-trip = %d, %v", n, err)
 	}
 	// Non-empty database refuses the switch.
-	if rc := e.SetCipher(CipherAES256GCM, false, false); rc != CodeBusy {
+	if rc := e.SetCipher(Cipher(2), false, false); rc != CodeMisuse {
 		t.Fatalf("switch on data = %d, want BUSY", rc)
 	}
 	// Locks refuse the switch even when empty.
 	e2 := OpenMem(testKey())
 	defer e2.Close()
-	if rc := e2.SetCipher(CipherAEGIS256, false, true); rc != CodeBusy {
+	if rc := e2.SetCipher(Cipher(2), false, true); rc != CodeMisuse {
 		t.Fatalf("switch under lock = %d, want BUSY", rc)
 	}
 	if rc := e2.SetCipher(CipherAES256GCM, false, true); rc != CodeOK {
@@ -198,10 +198,10 @@ func TestEngineKeyringSealRotatePrune(t *testing.T) {
 		t.Fatalf("unsealed inventory = %s", inv)
 	}
 	// Stage KDF params, then seal.
-	if rc := e.SetParam(KeyringParamTime, 2, false); rc != CodeOK {
+	if rc := e.SetParam(KeyringParamScryptN, 2, false); rc != CodeOK {
 		t.Fatalf("stage time = %d", rc)
 	}
-	if rc := e.SetParam(KeyringParamTime, 99, false); rc != CodeError {
+	if rc := e.SetParam(KeyringParamScryptN, 99, false); rc != CodeError {
 		t.Fatalf("bad time = %d, want ERROR", rc)
 	}
 	if rc := e.SetParam(KeyringParamKDF, KDFDirectHKDF, false); rc != CodeOK {
@@ -377,7 +377,7 @@ func TestEnginePragmaTable(t *testing.T) {
 		wantSubstr string
 	}{
 		{"cipher", nil, false, false, CodeOK, "aes256gcm"},
-		{"cipher", str("aegis256"), false, false, CodeOK, "aegis256"},
+		{"cipher", str("aes256gcm"), false, false, CodeOK, "aes256gcm"},
 		{"cipher", str("bogus"), false, false, CodeError, "must be"},
 		{"cipher", str("aes256gcm"), true, false, CodeReadOnly, "read-only"},
 		{"compression", nil, false, false, CodeOK, "zstd3"},
@@ -398,9 +398,9 @@ func TestEnginePragmaTable(t *testing.T) {
 		{"journal_mode", str("wal"), false, false, CodeError, "DELETE"},
 		{"mmap_size", str("999"), false, false, CodeOK, "0"},
 		{"murmur_kdf", nil, false, false, CodeOK, "direct"},
-		{"murmur_kdf_time", nil, false, false, CodeOK, "3"},
-		{"murmur_kdf_time", str("2"), false, false, CodeOK, "2"},
-		{"murmur_kdf_time", str("99"), false, false, CodeError, "range"},
+		{"murmur_scrypt_n", nil, false, false, CodeOK, "65536"},
+		{"murmur_scrypt_n", str("2"), false, false, CodeOK, "2"},
+		{"murmur_scrypt_n", str("99"), false, false, CodeError, "range"},
 		{"murmur_nope", nil, false, false, CodeError, "replication"},
 		{"rocksdb_sync", nil, false, false, CodeNotFound, ""},
 		{"unknown_pragma_xyz", nil, false, false, CodeNotFound, ""},

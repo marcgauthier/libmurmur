@@ -23,6 +23,8 @@ extern int nvFlushDb(const char *);
 #include "sha256.h"
 #include "sqlite3.h"
 
+#include "platform_file.h"
+
 #define FILES_AVAIL_PREFIX "08/files/availability/"
 #define FILES_MAGIC "SPFO0001"
 #define FILES_MAGIC_LEN 8
@@ -179,7 +181,9 @@ static uint64_t files_now_ms(void) {
 }
 
 static uint64_t modified_ms(const struct stat *st) {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  return st->st_mtime < 0 ? 0 : (uint64_t)st->st_mtime * 1000ull;
+#elif defined(__APPLE__)
   return (uint64_t)st->st_mtimespec.tv_sec * 1000ull +
          (uint64_t)st->st_mtimespec.tv_nsec / 1000000ull;
 #else

@@ -6,7 +6,7 @@
 
 **libmurmur** is an embedded, in-process database library built on SQLite, designed for local-first, peer-to-peer applications requiring high write throughput and masterless replication.
 
-Instead of writing SQLite pages to a standard filesystem file, libmurmur implements a custom SQLite Virtual File System (VFS) that routes storage directly into an embedded **RocksDB** LSM-tree engine. All stored records are transparently compressed with **zstd** and encrypted with **AEGIS-256** (or **AES-256-GCM**) using an **Argon2id**-derived keyring.
+Instead of writing SQLite pages to a standard filesystem file, libmurmur implements a custom SQLite Virtual File System (VFS) that routes storage directly into an embedded **RocksDB** LSM-tree engine. All stored records are transparently compressed with **zstd** and encrypted with **AES-256-GCM**. Password-protected keyrings use **scrypt** from AWS-LC.
 
 ### Key Architectural Concepts
 
@@ -21,9 +21,8 @@ Instead of writing SQLite pages to a standard filesystem file, libmurmur impleme
   - **CLI Tools**: Interactive `sqlite3-murmur` shell for encrypted store inspection and `murmur-admin` for maintenance.
   - **Language Bindings**: Native C ABI, zero-dependency Rust client, and idiomatic Go package (`murmurdb`).
 
-On-disk format and PRAGMA surface match
-[sqlite-murmur](../sqlite-murmur), proven both directions by the
-format cross-check.
+AES page records and direct-HKDF keyrings retain their established format.
+Password keyrings now use a distinct scrypt format ID; see the migration notes.
 
 ## Layout
 
@@ -32,9 +31,9 @@ format cross-check.
   process, then open stores with `sqlite3_open_v2(..., "sqlite-murmur")`.
 - `deps/` — vendored third-party sources plus project-owned natives:
   - `sqlite/` — SQLite amalgamation (FTS5 enabled).
-  - `crsqlite/` — real Rust cr-sqlite static bundle
-    (`libcrsql_bundle_isolated.a` + headers).
-  - `zstd/`, `aegis/`, `aws-lc/` (AES-256-GCM backend), `argon2/`,
+  - `crsqlite/` — pinned upstream C/Rust cr-sqlite source, built into
+    `libcrsql_bundle_isolated.a` (see its README).
+  - `zstd/`, `aws-lc/` (AES-256-GCM and scrypt backend),
     `rocksdb/`, `mbedtls/`, `picoquic/`, `picotls/`.
   - `vec0/` — vendored brute-force vector index module.
   - `codec/` — page codec (compress + encrypt records).
@@ -57,11 +56,21 @@ format cross-check.
   `go-client-benchmark/` (same workload, CSV output).
 - `docs/native/` — protocol spec, transport design, storage checklist.
 
+See [crypto format migration](docs/native/crypto_migration.md) before opening
+stores created with AEGIS or Argon2id.
+
+## Platform support
+
+Windows x64 (MinGW-w64) and Linux x86-64 are the target platforms.
+See [platform build instructions and validation limits](docs/native/platform_support.md).
+cr-sqlite is built from vendored upstream C/Rust source; broader Windows runtime integration gates remain.
+
 ## Prerequisites
 
 - A C/C++ compiler (gcc/g++ or clang)
 - Go 1.24+ (Go client, reference tests, format cross-check)
-- Rust toolchain (Rust client and benchmark only)
+- Pinned Rust nightly and libclang for the upstream cr-sqlite core;
+  Rust client and benchmark also use Rust
 - `../sqlite-murmur/build-a1` for the format cross-check and
   Rust reference benchmarks
 
@@ -98,8 +107,11 @@ The [sqlite3-murmur CLI](sqlite3-murmur-tool/README.md) prompts for a
 passphrase and uses RocksDB directories for databases and backups. It
 reuses the vendored SQLite shell and links the same `libmurmur.a`.
 
+Historical benchmark results below predate the removal of AEGIS and Argon2id;
+they are not measurements of the current AES-GCM/scrypt build.
+
 All benchmarks run with replication on so cr-sqlite is in the
-loop, with AEGIS-256, zstd level 3, 100 ms flush, and an 80/20
+loop, with AES-256-GCM, zstd level 3, 100 ms flush, and an 80/20
 read/write mix (4 primary-key reads per insert):
 
 ```sh
@@ -128,7 +140,7 @@ a loaded desktop skews lower.
 
 Done: page codec, write-back cache, VFS byte path with
 cross-connection locks, real Rust cr-sqlite linked into SQLite,
-vendored zstd/AES/AEGIS/QUIC, keyring/Argon2, PRAGMA table,
+vendored zstd/AES/QUIC, keyring/scrypt, PRAGMA table,
 backup/offline tools, native replication core + QUIC/TLS
 transport + membership + schema + snapshots/retention, file
 objects with QUIC fetch, FTS5/vec0 search, and the C admin CLI.

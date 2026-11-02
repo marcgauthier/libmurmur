@@ -24,9 +24,9 @@
 /* Simple set of utilities */
 #ifdef _WINDOWS
 #define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <WinSock2.h>
-#include <Ws2def.h>
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2def.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>

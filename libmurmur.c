@@ -4,12 +4,10 @@
  *
  *   deps/sqlite            SQLite engine (pristine amalgamation)
  *   deps/crsqlite/src      cr-sqlite C wrapper (+ Rust bundle repacked)
- *   deps/codec             page codec: AES-256-GCM (AWS-LC) + AEGIS-256
+ *   deps/codec             page codec: AES-256-GCM (AWS-LC)
  *                            + Zstandard
  *   deps/keyring           sealed key storage primitives
- *   deps/argon2            password hashing (reference code)
  *   deps/zstd              Zstandard (flat sources)
- *   deps/aegis             libaegis AEAD
  *   deps/aws-lc            libcrypto repacked from its own archive (not rebuilt)
  *   deps/mbedtls           mbedTLS (sole X.509 backend)
  *   deps/picotls           picotls (no minicrypto; stubbed fail-closed)

@@ -11,7 +11,7 @@ enum {
   /* Plaintext page size; decrypt output is always exactly this. */
   NV_BLOCK = 4096,
   /* Seal output bound. Worst case is ~4.3 KiB (9-byte keyed header +
-   * 32-byte AEGIS nonce + zstd worst-case expansion of 4 KiB + 32-byte
+   * 12-byte AES-GCM nonce + zstd worst-case expansion of 4 KiB + 16-byte
    * tag); 8 KiB leaves headroom for future flags. */
   NV_MAX_RECORD = 8192,
 

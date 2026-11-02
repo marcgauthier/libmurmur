@@ -4,7 +4,7 @@
  * README.md for the field mapping). Links libmurmur.a only.
  *
  * Credential rule: every secret resolves to a 32-byte master (64 hex
- * chars decode raw, anything else hashes with SHA-256). Argon2id
+ * chars decode raw, anything else hashes with SHA-256). scrypt
  * envelopes stretch those master bytes; direct envelopes use them in
  * HKDF. The reference branches string passphrases on the envelope
  * KDF; this port has no string-passphrase open path, so the mapping
@@ -23,7 +23,9 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -32,6 +34,7 @@
 #include "murmur/open.h"
 #include "murmur/store.h"
 #include "sha256.h"
+#include "murmur/platform_file.h"
 #include "sqlite3.h"
 
 static const char *kVersion = "0.1.0";
@@ -637,6 +640,9 @@ static long parse_go_duration(const char *s) {
 
 /* Runs helper <uri>, capturing stdout (bounded) with a timeout.
  * Stderr tail (bounded) joins errors for diagnostics. */
+#ifdef _WIN32
+#include "keyprovider_windows.h"
+#else
 static int kp_exec(const char *helper, const char *uri, long timeout_s,
                    uint8_t out[32], char *err, size_t cap) {
   int so[2], se[2];
@@ -766,6 +772,8 @@ static int kp_exec(const char *helper, const char *uri, long timeout_s,
   free(raw);
   return rc;
 }
+
+#endif
 
 static int resolve_uri(const char *uri, uint8_t out[32], char *err,
                        size_t cap) {
@@ -1196,12 +1204,12 @@ static void inventory_parse(const char *js, inventory_t *iv) {
 }
 
 static const char *kdf_name(uint8_t kdf) {
-  /* Port KDF ids mirror spool: 0 direct, 1 argon2id. */
+  /* Port KDF ids mirror spool: 0 direct, 2 scrypt. */
   if (kdf == 0) {
     return "direct";
   }
-  if (kdf == 1) {
-    return "argon2id";
+  if (kdf == 2) {
+    return "scrypt";
   }
   static char unk[32];
   snprintf(unk, sizeof(unk), "unknown(%u)", kdf);

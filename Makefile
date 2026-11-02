@@ -2,8 +2,8 @@
 #
 # Produces libmurmur.a from every native component: SQLite, cr-sqlite
 # (C wrapper + Rust bundle), the page codec (AES-256-GCM via AWS-LC +
-# AEGIS-256 + Zstandard), the
-# keyring, Argon2, the C++ VFS/storage managers, and the
+# AES-256-GCM + Zstandard), the
+# keyring, scrypt, the C++ VFS/storage managers, and the
 # picoquic+picotls+mbedTLS QUIC transport. Third-party archives (RocksDB,
 # the cr-sqlite Rust bundle) are repacked in, so clients link exactly one
 # file. Per-component flags below replicate the cgo flags each source set
@@ -36,17 +36,15 @@ ZSTD_DEFS   := -DZSTD_DISABLE_ASM=1
 INC_SQLITE := -Ideps/sqlite
 INC_CRSQL  := -Ideps/sqlite -Ideps/crsqlite/include
 INC_ZSTD   := -Ideps/zstd
-INC_AEGIS  := -Ideps/aegis/src/include
 INC_AWSLC  := -Ideps/aws-lc/include
 INC_MBED   := -Ideps/mbedtls/include
 INC_PTLS   := -Ideps/picotls/include
 INC_PICO   := -Ideps/picoquic/picoquic -Ideps/picoquic/picoquic_mbedtls
-# Project C/C++ (codec, keyring, argon2, murmur managers): same superset
+# Project C/C++ (codec, keyring, scrypt, murmur managers): same superset
 # the nvfs cgo package used, so headers resolve as before.
 INC_NATIVE := -Ideps/murmur -Ideps/codec -Ideps/keyring \
-              -Ideps/argon2 -Ideps/argon2/blake2 \
               -Ideps/sqlite -Ideps/zstd -Ideps/vec0 \
-              -Ideps/aegis/src/include -Ideps/rocksdb/include \
+              -Ideps/rocksdb/include \
               $(INC_PICO) $(INC_PTLS) $(INC_MBED)
 
 ifdef MURMUR_VFS_STATS
@@ -62,12 +60,8 @@ SRC_SQLITE  := deps/sqlite/sqlite3.c
 SRC_CRSQL   := deps/crsqlite/wrapper_tu.c
 SRC_CODEC   := deps/codec/codec.cc deps/codec/aesgcm.cc
 SRC_KEYRING := deps/keyring/sha256.c deps/keyring/hkdf.c \
-               deps/keyring/crc32c.c deps/keyring/keyring.cc
-SRC_ARGON2  := deps/argon2/argon2.c deps/argon2/core.c \
-               deps/argon2/ref.c deps/argon2/encoding.c \
-               deps/argon2/thread.c deps/argon2/blake2/blake2b.c
+               deps/keyring/crc32c.c deps/keyring/keyring.cc deps/keyring/scrypt.cc
 SRC_ZSTD    := $(wildcard deps/zstd/*.c)
-SRC_AEGIS   := $(shell find deps/aegis/src -name '*.c')
 SRC_MBED    := $(wildcard deps/mbedtls/library/*.c)
 SRC_PTLS    := $(wildcard deps/picotls/lib/*.c)
 # picoquic core minus the fusion TU (minicrypto-free build), plus the two
@@ -86,7 +80,7 @@ SRC_VEC0    := deps/vec0/vec0.c
 SRC_LIB     := libmurmur.c
 
 SRCS := $(SRC_SQLITE) $(SRC_CRSQL) $(SRC_CODEC) $(SRC_KEYRING) \
-        $(SRC_ARGON2) $(SRC_ZSTD) $(SRC_AEGIS) $(SRC_MBED) \
+        $(SRC_ZSTD) $(SRC_MBED) \
         $(SRC_PTLS) $(SRC_PICO) $(SRC_MURMUR) $(SRC_VEC0) $(SRC_LIB)
 
 OBJS := $(patsubst %.c,$(BUILD)/%.o,$(filter %.c,$(SRCS))) \
@@ -99,14 +93,12 @@ $(BUILD)/deps/sqlite/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(SQLITE_DEFS) $(I
 # instead of through the extension API table (Go passes pApi=NULL).
 $(BUILD)/deps/crsqlite/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) -DSQLITE_CORE $(SQLITE_DEFS) $(INC_CRSQL)
 $(BUILD)/deps/zstd/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(ZSTD_DEFS) $(INC_ZSTD)
-$(BUILD)/deps/aegis/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_AEGIS)
 $(BUILD)/deps/mbedtls/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(PQ_DEFS) $(INC_PICO) $(INC_PTLS) $(INC_MBED)
 $(BUILD)/deps/picotls/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(PQ_DEFS) $(INC_PICO) $(INC_PTLS) $(INC_MBED)
 $(BUILD)/deps/picoquic/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(PQ_DEFS) $(INC_PICO) $(INC_PTLS) $(INC_MBED) -Wno-pragma-once-outside-header
 $(BUILD)/deps/codec/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE) $(INC_AWSLC)
 $(BUILD)/deps/keyring/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE)
-$(BUILD)/deps/keyring/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE)
-$(BUILD)/deps/argon2/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE)
+$(BUILD)/deps/keyring/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(INC_NATIVE) $(INC_AWSLC)
 $(BUILD)/deps/murmur/%.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE)
 $(BUILD)/deps/murmur/%.o: CXXFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE)
 $(BUILD)/deps/murmur/cellsign.o: CFLAGS := $(OPT) $(PIC) $(DEPFLAGS) $(MURMUR_DEFS) $(INC_NATIVE) $(INC_AWSLC)

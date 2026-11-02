@@ -1,3 +1,7 @@
+Historical storage audit: the AEGIS/Argon2id references and old parameter
+names below describe the previous implementation. Current crypto behavior is
+documented in [crypto_migration.md](crypto_migration.md).
+
 # Storage porting checklist: P1e (kill Go key callbacks) then P2 (offline tools + registration native)
 
 Scope: `deps/murmur/open.{h,cc}`, `deps/murmur/vfs.cc`, `clients/go/bindings/nvfs/nvfs.go`, `clients/go/pkgs/storage/*.go`, `clients/go/pkgs/murmur/*.go`.

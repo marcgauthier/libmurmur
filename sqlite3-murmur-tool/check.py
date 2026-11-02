@@ -118,7 +118,7 @@ class ShellTests(unittest.TestCase):
         result = self.cli(self.store, "CREATE TABLE example(value TEXT);"
                           f"INSERT INTO example VALUES('{payload}');"
                           "PRAGMA cipher; PRAGMA compression; PRAGMA murmur_kdf;")
-        self.assertEqual(result.stdout, "aes256gcm\nzstd3\nargon2id\n")
+        self.assertEqual(result.stdout, "aes256gcm\nzstd3\nscrypt\n")
         self.assertTrue((self.store / "CURRENT").is_file())
         self.assertEqual(self.native(self.store, "SELECT value FROM example;"), payload + "\n")
         self.cli(self.store, "SELECT * FROM example;", phrase="wrong passphrase", ok=False)
@@ -172,14 +172,14 @@ class ShellTests(unittest.TestCase):
                                  "SELECT count(*) FROM docs WHERE docs MATCH 'searchable';").stdout, "1\n1\n")
         self.cli(self.store, "BEGIN; INSERT INTO example VALUES(3,'unfinished');")
         self.assertEqual(self.cli(self.store, "SELECT count(*) FROM example;").stdout, "1\n")
-        empty = self.root / "aegis"
-        self.cli(empty, "PRAGMA cipher='aegis256'; PRAGMA compression='zstd9';"
-                        "CREATE TABLE example(value); INSERT INTO example VALUES('aegis');")
-        self.assertEqual(self.cli(empty, "PRAGMA cipher; SELECT value FROM example;").stdout, "aegis256\naegis\n")
+        empty = self.root / "aes"
+        self.cli(empty, "PRAGMA cipher='aes256gcm'; PRAGMA compression='zstd9';"
+                        "CREATE TABLE example(value); INSERT INTO example VALUES('aes');")
+        self.assertEqual(self.cli(empty, "PRAGMA cipher; SELECT value FROM example;").stdout, "aes256gcm\naes\n")
         self.cli(empty, "PRAGMA compression=none; INSERT INTO example VALUES('uncompressed');")
         self.cli(empty, "PRAGMA compression=zstd22; INSERT INTO example VALUES('compressed');")
         self.assertEqual(self.cli(empty, "SELECT count(*) FROM example;").stdout, "3\n")
-        self.cli(empty, "PRAGMA cipher='aes256gcm';", ok=False)
+        self.cli(empty, "PRAGMA cipher='aegis256';", ok=False)
 
     def test_explicit_exit_flushes(self):
         self.create()
@@ -233,7 +233,7 @@ class ShellTests(unittest.TestCase):
         for command in ("backup", "save", "clone"):
             target = self.root / command
             self.cli(self.store, f".{command} {target}")
-            self.assertEqual(self.cli(target, "SELECT value FROM example; PRAGMA murmur_kdf;").stdout, "hello\nargon2id\n")
+            self.assertEqual(self.cli(target, "SELECT value FROM example; PRAGMA murmur_kdf;").stdout, "hello\nscrypt\n")
             self.cli(target, "SELECT * FROM example;", phrase="wrong", ok=False)
         self.cli(self.store, f".clone {self.root / 'clone'}", ok=False)
         self.cli(self.store, f".c {self.root / 'clone-abbreviated'}")

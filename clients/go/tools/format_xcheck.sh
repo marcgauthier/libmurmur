@@ -18,7 +18,7 @@ go build -o "$WORK/xcheck_go" ./tools/xcheck
 echo "== build Rust driver =="
 gcc -o "$WORK/xcheck_rust" tests/format_xcheck.c \
   "-I$RUST_ROOT/include" "-I$RUST_ROOT/third-party/sqlite" \
-  "$RUST_BUILD/murmur-storage/base+aegis256/release/libmurmur_storage.a" \
+  "$RUST_BUILD/murmur-storage/base+aes256gcm/release/libmurmur_storage.a" \
   "$RUST_BUILD/murmur-storage-api/base+crsqlite+murmur/release/libmurmur_storage_api.a" \
   "$RUST_BUILD/libsqlite_murmur.a" \
   "$RUST_BUILD/murmur/static/release/libmurmur_replication.a" \
@@ -39,7 +39,7 @@ check_rows() { # <actual> <expected...> (compares ROWS line)
   else echo "MISMATCH $desc:"; echo "  got:      $1"; echo "  expected: $2"; exit 1; fi
 }
 
-for cipher in aes256gcm aegis256; do
+for cipher in aes256gcm; do
   echo "== cipher $cipher =="
   # Rust writes, Go reads.
   "$WORK/xcheck_rust" write "$WORK/r2g-$cipher" "$cipher" >/dev/null
@@ -76,3 +76,6 @@ for cipher in aes256gcm aegis256; do
 done
 
 echo "XCHECK-OK ($pass checks)"
+
+# This external legacy oracle covers AES/direct-HKDF only; scrypt coverage is
+# provided by native crypto-policy and Go keyring differential tests.

@@ -1,12 +1,14 @@
 /* murmur config - see config.h. */
 #include "config.h"
 
-#include <arpa/inet.h>
+#include "platform_net.h"
+#ifndef _WIN32
 #include <netdb.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+
 
 #include "sqlite3.h"
 
@@ -74,9 +76,9 @@ static const def_ent_t kDefaults[] = {
     {"schema_master", ""},
     {"schema_master_enabled", "0"},
     {"kdf", "direct"},
-    {"kdf_time", "3"},
-    {"kdf_memory_kib", "65536"},
-    {"kdf_threads", "4"},
+    {"scrypt_n", "65536"},
+    {"scrypt_r", "8"},
+    {"scrypt_p", "1"},
     {"bridge_dir", ""},
     {"files_generation", "0"},
     {"max_file_bytes", "4294967296"},
@@ -340,10 +342,12 @@ static int resolve_ok(const uint8_t *host, size_t host_len,
   memset(&hints, 0, sizeof(hints));
   hints.ai_socktype = SOCK_STREAM;
   struct addrinfo *res = NULL;
-  int rc = getaddrinfo(node, serv, &hints, &res);
+  int started = murmur_net_start() == 0;
+  int rc = started ? getaddrinfo(node, serv, &hints, &res) : -1;
   if (rc == 0) {
     freeaddrinfo(res);
   }
+  if (started) murmur_net_stop();
   free(node);
   free(serv);
   return rc == 0 ? 0 : -1;
@@ -750,18 +754,19 @@ int murmur_cfg_validate(sqlite3 *db, const char *name, const uint8_t *value,
   }
   if (strcmp(name, "kdf") == 0) {
     return (len == 6 && memcmp(value, "direct", 6) == 0) ||
-                   (len == 8 && memcmp(value, "argon2id", 8) == 0)
+                   (len == 6 && memcmp(value, "scrypt", 6) == 0)
                ? 0
                : -1;
   }
-  if (strcmp(name, "kdf_time") == 0) {
+  if (strcmp(name, "scrypt_n") == 0) {
+    uint64_t n=0;
+    return murmur_cfg_parse_uint(value,len,&n)==0 && n>=2 && n<=(1u<<20) && (n&(n-1))==0 ? 0 : -1;
+  }
+  if (strcmp(name, "scrypt_r") == 0) {
     return in_range(value, len, 1, 32);
   }
-  if (strcmp(name, "kdf_memory_kib") == 0) {
-    return in_range(value, len, 1024, 16777216);
-  }
-  if (strcmp(name, "kdf_threads") == 0) {
-    return in_range(value, len, 1, 32);
+  if (strcmp(name, "scrypt_p") == 0) {
+    return in_range(value, len, 1, 16);
   }
   if (strcmp(name, "files_dir") == 0) {
     return 0;

@@ -64,10 +64,6 @@ func TestRoundTrips(t *testing.T) {
 	roundTrip(t, CipherAES256GCM, 0, true)
 	roundTrip(t, CipherAES256GCM, 9, false)
 	roundTrip(t, CipherAES256GCM, 9, true)
-	roundTrip(t, CipherAEGIS256, 0, false)
-	roundTrip(t, CipherAEGIS256, 0, true)
-	roundTrip(t, CipherAEGIS256, 9, false)
-	roundTrip(t, CipherAEGIS256, 9, true)
 }
 
 func TestCorruptRecordsFailClosed(t *testing.T) {
@@ -124,21 +120,21 @@ func TestTamperMatrix(t *testing.T) {
 		t.Fatalf("wrong page err=%v, want ErrAuth", err)
 	}
 	// Cross-cipher records fail closed.
-	if _, err := Decrypt(CipherAEGIS256, key, 100, rec); err == nil {
+	if _, err := Decrypt(Cipher(2), key, 100, rec); err == nil {
 		t.Fatal("cross-cipher opened")
 	}
-	// Unkeyed AEGIS tamper.
-	rec2, err := Encrypt(CipherAEGIS256, key, 7, page, false, 0)
+	// Unkeyed AES tamper.
+	rec2, err := Encrypt(CipherAES256GCM, key, 7, page, false, 0)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	if string(rec2[:4]) != HeaderAEGIS {
+	if string(rec2[:4]) != HeaderAES {
 		t.Fatalf("magic=%q", rec2[:4])
 	}
 	mut := bytes.Clone(rec2)
 	mut[len(mut)-1] ^= 0x01
-	if _, err := Decrypt(CipherAEGIS256, key, 7, mut); err == nil {
-		t.Fatal("aegis tag tamper opened")
+	if _, err := Decrypt(CipherAES256GCM, key, 7, mut); err == nil {
+		t.Fatal("AES tag tamper opened")
 	}
 }
 
@@ -147,7 +143,7 @@ func TestHelpers(t *testing.T) {
 	if k[0] != 'p' || k[1] != 0x01 || k[8] != 0x08 {
 		t.Fatalf("page key=%x", k)
 	}
-	if CipherName(CipherAES256GCM) != "aes256gcm" || CipherName(CipherAEGIS256) != "aegis256" {
+	if CipherName(CipherAES256GCM) != "aes256gcm" || CipherName(Cipher(2)) != "unspecified" {
 		t.Fatal("cipher names")
 	}
 	if _, err := Encrypt(CipherUnspecified, testKey(), 1, testPage(), false, 0); err != ErrMisuse {

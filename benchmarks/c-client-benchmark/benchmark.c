@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     uint8_t key[32];
     for (unsigned i = 0; i < sizeof(key); ++i) key[i] = (uint8_t)(i * 17u + 3u);
     if (murmur_db_key(db, key) != SQLITE_OK) fail(db, "murmur_db_key");
-    exec_sql(db, "PRAGMA cipher='aegis256'; PRAGMA compression='zstd3'; PRAGMA flush_interval_ms=100;"
+    exec_sql(db, "PRAGMA cipher='aes256gcm'; PRAGMA compression='zstd3'; PRAGMA flush_interval_ms=100;"
         "CREATE TABLE records(id INTEGER PRIMARY KEY NOT NULL, body TEXT NOT NULL DEFAULT '');"
         "CREATE TABLE murmur_config(name TEXT PRIMARY KEY,value TEXT NOT NULL);"
         "CREATE TABLE murmur_identity(id INTEGER PRIMARY KEY CHECK(id=1),node BLOB,site BLOB,incarnation INTEGER NOT NULL DEFAULT 0);"
@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
     uint64_t disk_bytes = tree_bytes(path);
     double disk_pct = raw_bytes ? 100.0 * (double)disk_bytes / (double)raw_bytes : 0.0;
     puts("seconds,writes,transactions,ops_per_second,write_ops_per_second,tracked_changes,batch_size,read_write_mix,encryption,cipher,compression,replication,replication_crdt,raw_database_bytes,store_disk_bytes,disk_to_raw_pct");
-    printf("%.6f,%" PRIu64 ",%" PRIu64 ",%.3f,%.3f,%" PRIu64 ",%u,80_read_20_write,on,aegis256,zstd3,on,cr_sqlite_crdt,%" PRIu64 ",%" PRIu64 ",%.2f\n",
+    printf("%.6f,%" PRIu64 ",%" PRIu64 ",%.3f,%.3f,%" PRIu64 ",%u,80_read_20_write,on,aes256gcm,zstd3,on,cr_sqlite_crdt,%" PRIu64 ",%" PRIu64 ",%.2f\n",
         elapsed, writes, txns, writes * 5.0 / elapsed, writes / elapsed, tracked, batch, raw_bytes, disk_bytes, disk_pct);
     murmur_shutdown();
     return 0;

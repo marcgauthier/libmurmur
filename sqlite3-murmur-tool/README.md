@@ -57,14 +57,14 @@ Passphrase bytes are preserved, including spaces and UTF-8. For compatibility
 with `murmur-admin`, exactly 64 hexadecimal characters decode to a raw
 32-byte key; all other input is hashed with SHA-256. The resulting value
 is supplied to libmurmur's existing key API. **New stores additionally use
-the native salted Argon2id keyring** (3 iterations, 64 MiB, 4 lanes).
+the native salted scrypt keyring** (N=65536, r=8, p=1; approximately 64 MiB).
 Existing stores keep their keyring and protection settings.
 
 New stores use AES-256-GCM and Zstandard level 3. Existing PRAGMAs remain
 available, including:
 
 ```sql
-PRAGMA cipher;                   -- aes256gcm or aegis256
+PRAGMA cipher;                   -- aes256gcm
 PRAGMA compression;              -- none or zstd1 through zstd22
 PRAGMA compression = 'zstd9';
 PRAGMA murmur_kdf;
@@ -97,10 +97,8 @@ Persistent database operations support Murmur stores only:
   introduced.
 
 The Linux build uses the existing native toolchain and `patch`. The Windows
-cross-build uses CMake and MinGW, rebuilding the same storage, codec, SQLite,
-RocksDB and AWS-LC code for Windows. Unused replication/transport objects are
-omitted from its storage archive. The test suite additionally uses Python 3's
-standard library.
+cross-build uses the root CMake build and MinGW, including the full library
+and its replication/transport objects. It builds the vendored upstream cr-sqlite source for Windows. The CLI test suite additionally uses Python 3's standard library.
 
 ```sh
 make sqlite3-murmur-tool-check
@@ -110,3 +108,10 @@ make sqlite3-murmur-tool-check
 `shell.patch` is applied with zero fuzz to a generated copy under `build/`;
 the vendored shell is unchanged. Upstream changes that invalidate a patch
 hunk fail the build and require review.
+
+The CMake build now links the full library on both platforms. See the
+[platform build requirements](../docs/native/platform_support.md), including
+the Rust/libclang prerequisites. The Windows release script builds cr-sqlite
+from source and does not install compiler packages.
+
+AEGIS/Argon2id stores require [export/import with the old build](../docs/native/crypto_migration.md).

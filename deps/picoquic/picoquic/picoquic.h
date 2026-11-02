@@ -25,8 +25,8 @@
 #include <stdint.h>
 #include <stdarg.h>
 #ifdef _WINDOWS
-#include <WS2tcpip.h>
-#include <Ws2def.h>
+#include <ws2tcpip.h>
+#include <ws2def.h>
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>

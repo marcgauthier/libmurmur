@@ -15,7 +15,7 @@ import (
 	"sort"
 
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
-	"golang.org/x/crypto/argon2"
+	"github.com/marcgauthier/libmurmur/clients/go/bindings/scrypt"
 )
 
 // Keyring errors. Authentication failures never expose key material.
@@ -27,15 +27,15 @@ var (
 	ErrMisuse  = errors.New("storage: keyring misuse")
 )
 
-// KDF ids and Argon2id defaults. They match the sqlite-murmur C ABI
-// (SQLITE_MURMUR_KDF_*, SQLITE_MURMUR_ARGON_*).
+// KDF ids and scrypt defaults. They match the sqlite-murmur C ABI
+// (MURMUR_KDF_DIRECT=0, MURMUR_KDF_SCRYPT=2).
 const (
 	KDFDirectHKDF = 0
-	KDFArgon2ID   = 1
+	KDFScrypt     = 2
 
-	ArgonTimeDefault      = 3
-	ArgonMemoryKiBDefault = 65536
-	ArgonThreadsDefault   = 4
+	ScryptNDefault = 65536
+	ScryptRDefault = 8
+	ScryptPDefault = 1
 )
 
 const (
@@ -69,15 +69,15 @@ type KeyEntry struct {
 // Current is the highest active id. Key material should be released
 // with Wipe once installed or copied elsewhere.
 type Keyring struct {
-	Seq            uint64
-	KDF            uint8
-	ArgonTime      uint32
-	ArgonMemoryKiB uint32
-	ArgonThreads   uint8
-	Context        [16]byte
-	WrapID         []byte
-	Keys           []KeyEntry
-	Current        uint32
+	Seq     uint64
+	KDF     uint8
+	ScryptN uint32
+	ScryptR uint32
+	ScryptP uint8
+	Context [16]byte
+	WrapID  []byte
+	Keys    []KeyEntry
+	Current uint32
 }
 
 // ByID returns a copy of the key entry with the given id.
@@ -116,7 +116,11 @@ func wipe(b []byte) {
 }
 
 // deriveProtector derives the 32-byte envelope protector. Exactly one of
-// master (direct-HKDF) or passphrase (Argon2id) must unlock the header KDF.
+// master (direct-HKDF) or passphrase (scrypt) must unlock the header KDF.
+func validScrypt(n, r uint32, p uint8) bool {
+	return n >= 2 && n&(n-1) == 0 && r >= 1 && r <= 32 && p >= 1 && p <= 16 && uint64(n)*uint64(r) <= 1<<20 && uint64(n)*uint64(r)*uint64(p) <= 1<<22
+}
+
 func deriveProtector(kdf uint8, master []byte, passphrase []byte, salt []byte, aTime, aMem uint32, aThreads uint8, storeID, contextID [16]byte) ([32]byte, error) {
 	var out [32]byte
 	info := make([]byte, 0, len(keysEncInfo)+32)
@@ -135,14 +139,17 @@ func deriveProtector(kdf uint8, master []byte, passphrase []byte, salt []byte, a
 		copy(out[:], dk)
 		wipe(dk)
 		return out, nil
-	case KDFArgon2ID:
+	case KDFScrypt:
 		if len(passphrase) == 0 {
 			return out, ErrAuth
 		}
-		if aThreads == 0 || aTime == 0 || aMem == 0 {
+		if !validScrypt(aTime, aMem, aThreads) {
 			return out, ErrCorrupt
 		}
-		stretched := argon2.IDKey(passphrase, salt, aTime, aMem, aThreads, keyLen)
+		stretched, err := scrypt.Key(passphrase, salt, int(aTime), int(aMem), int(aThreads), keyLen)
+		if err != nil {
+			return out, ErrCorrupt
+		}
 		dk, err := hkdf.Key(sha256.New, stretched, salt, string(info), keyLen)
 		wipe(stretched)
 		if err != nil {
@@ -166,23 +173,23 @@ func aesGCM(key [32]byte) (cipher.AEAD, error) {
 
 // SealOptions seals one envelope revision with fresh salt and nonce.
 type SealOptions struct {
-	KDF            uint8
-	Seq            uint64
-	StoreID        [16]byte
-	ContextID      [16]byte
-	WrapID         []byte
-	ArgonTime      uint32
-	ArgonMemoryKiB uint32
-	ArgonThreads   uint8
-	Master         []byte // exactly one of Master / Passphrase
-	Passphrase     []byte
-	Keys           []KeyEntry
+	KDF        uint8
+	Seq        uint64
+	StoreID    [16]byte
+	ContextID  [16]byte
+	WrapID     []byte
+	ScryptN    uint32
+	ScryptR    uint32
+	ScryptP    uint8
+	Master     []byte // exactly one of Master / Passphrase
+	Passphrase []byte
+	Keys       []KeyEntry
 }
 
 // Seal encodes keys into a keys.enc v3 envelope. Keys are id-sorted on
 // the wire; duplicate ids are rejected.
 func Seal(o SealOptions) ([]byte, error) {
-	if o.KDF != KDFDirectHKDF && o.KDF != KDFArgon2ID {
+	if o.KDF != KDFDirectHKDF && o.KDF != KDFScrypt {
 		return nil, ErrMisuse
 	}
 	if len(o.WrapID) > maxWrapIDLen || len(o.Keys) == 0 || len(o.Keys) > maxDataKeys {
@@ -199,7 +206,7 @@ func Seal(o SealOptions) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, salt[:]); err != nil {
 		return nil, err
 	}
-	protector, err := deriveProtector(o.KDF, o.Master, o.Passphrase, salt[:], o.ArgonTime, o.ArgonMemoryKiB, o.ArgonThreads, o.StoreID, o.ContextID)
+	protector, err := deriveProtector(o.KDF, o.Master, o.Passphrase, salt[:], o.ScryptN, o.ScryptR, o.ScryptP, o.StoreID, o.ContextID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,10 +242,10 @@ func Seal(o SealOptions) ([]byte, error) {
 	binary.LittleEndian.PutUint64(hdr[7:15], o.Seq)
 	hdr = append(hdr, salt[:]...)
 	hdr = append(hdr, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint32(hdr[47:51], o.ArgonTime)
+	binary.LittleEndian.PutUint32(hdr[47:51], o.ScryptN)
 	hdr = append(hdr, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint32(hdr[51:55], o.ArgonMemoryKiB)
-	hdr = append(hdr, o.ArgonThreads)
+	binary.LittleEndian.PutUint32(hdr[51:55], o.ScryptR)
+	hdr = append(hdr, o.ScryptP)
 	hdr = append(hdr, byte(len(o.WrapID)))
 	hdr = append(hdr, o.WrapID...)
 	var crc [4]byte
@@ -270,7 +277,7 @@ func Seal(o SealOptions) ([]byte, error) {
 
 // Open authenticates a keys.enc v3 envelope and returns the unlocked ring.
 // Exactly one protector must match the header KDF: a 32-byte master for
-// direct-HKDF envelopes or a non-empty passphrase for Argon2id ones.
+// direct-HKDF envelopes or a non-empty passphrase for scrypt ones.
 func Open(envelope, master, passphrase []byte, storeID, contextID [16]byte) (*Keyring, error) {
 	if len(envelope) < 61 {
 		return nil, ErrCorrupt
@@ -282,7 +289,7 @@ func Open(envelope, master, passphrase []byte, storeID, contextID [16]byte) (*Ke
 		return nil, ErrCorrupt
 	}
 	kdf := envelope[6]
-	if kdf != KDFDirectHKDF && kdf != KDFArgon2ID {
+	if kdf != KDFDirectHKDF && kdf != KDFScrypt {
 		return nil, ErrCorrupt
 	}
 	wrapLen := int(envelope[56])
@@ -349,14 +356,14 @@ func Open(envelope, master, passphrase []byte, storeID, contextID [16]byte) (*Ke
 		return nil, ErrCorrupt
 	}
 	ring := &Keyring{
-		Seq:            seq,
-		KDF:            kdf,
-		ArgonTime:      aTime,
-		ArgonMemoryKiB: aMem,
-		ArgonThreads:   aThreads,
-		Context:        context,
-		WrapID:         append([]byte(nil), body[21:21+w]...),
-		Keys:           make([]KeyEntry, 0, count),
+		Seq:     seq,
+		KDF:     kdf,
+		ScryptN: aTime,
+		ScryptR: aMem,
+		ScryptP: aThreads,
+		Context: context,
+		WrapID:  append([]byte(nil), body[21:21+w]...),
+		Keys:    make([]KeyEntry, 0, count),
 	}
 	pos := 21 + w
 	seen := make(map[uint32]bool, count)
@@ -398,26 +405,26 @@ func Open(envelope, master, passphrase []byte, storeID, contextID [16]byte) (*Ke
 
 // CreateOptions seals a fresh envelope: single active key id 1, sequence 1.
 type CreateOptions struct {
-	KDF            uint8
-	ArgonTime      uint32
-	ArgonMemoryKiB uint32
-	ArgonThreads   uint8
-	WrapID         []byte
-	StoreID        [16]byte
-	ContextID      [16]byte
-	Master         []byte
-	Passphrase     []byte
+	KDF        uint8
+	ScryptN    uint32
+	ScryptR    uint32
+	ScryptP    uint8
+	WrapID     []byte
+	StoreID    [16]byte
+	ContextID  [16]byte
+	Master     []byte
+	Passphrase []byte
 }
 
 // Create seals a fresh single-key envelope.
 func Create(o CreateOptions) ([]byte, error) {
-	if o.KDF != KDFDirectHKDF && o.KDF != KDFArgon2ID {
+	if o.KDF != KDFDirectHKDF && o.KDF != KDFScrypt {
 		return nil, ErrMisuse
 	}
-	if o.KDF == KDFDirectHKDF && (o.ArgonTime != 0 || o.ArgonMemoryKiB != 0 || o.ArgonThreads != 0) {
+	if o.KDF == KDFDirectHKDF && (o.ScryptN != 0 || o.ScryptR != 0 || o.ScryptP != 0) {
 		return nil, ErrMisuse
 	}
-	if o.KDF == KDFArgon2ID && (o.ArgonTime == 0 || o.ArgonMemoryKiB == 0 || o.ArgonThreads == 0) {
+	if o.KDF == KDFScrypt && !validScrypt(o.ScryptN, o.ScryptR, o.ScryptP) {
 		return nil, ErrMisuse
 	}
 	var first [32]byte
@@ -426,17 +433,17 @@ func Create(o CreateOptions) ([]byte, error) {
 	}
 	defer wipe(first[:])
 	return Seal(SealOptions{
-		KDF:            o.KDF,
-		Seq:            1,
-		StoreID:        o.StoreID,
-		ContextID:      o.ContextID,
-		WrapID:         o.WrapID,
-		ArgonTime:      o.ArgonTime,
-		ArgonMemoryKiB: o.ArgonMemoryKiB,
-		ArgonThreads:   o.ArgonThreads,
-		Master:         o.Master,
-		Passphrase:     o.Passphrase,
-		Keys:           []KeyEntry{{ID: 1, Key: first, Active: true}},
+		KDF:        o.KDF,
+		Seq:        1,
+		StoreID:    o.StoreID,
+		ContextID:  o.ContextID,
+		WrapID:     o.WrapID,
+		ScryptN:    o.ScryptN,
+		ScryptR:    o.ScryptR,
+		ScryptP:    o.ScryptP,
+		Master:     o.Master,
+		Passphrase: o.Passphrase,
+		Keys:       []KeyEntry{{ID: 1, Key: first, Active: true}},
 	})
 }
 
@@ -472,17 +479,17 @@ func (r *Keyring) Rotate(storeID [16]byte, master, passphrase []byte) ([]byte, u
 	defer wipe(fresh[:])
 	staged = append(staged, KeyEntry{ID: next, Key: fresh, Active: true})
 	env, err := Seal(SealOptions{
-		KDF:            r.KDF,
-		Seq:            r.Seq + 1,
-		StoreID:        storeID,
-		ContextID:      r.Context,
-		WrapID:         r.WrapID,
-		ArgonTime:      r.ArgonTime,
-		ArgonMemoryKiB: r.ArgonMemoryKiB,
-		ArgonThreads:   r.ArgonThreads,
-		Master:         master,
-		Passphrase:     passphrase,
-		Keys:           staged,
+		KDF:        r.KDF,
+		Seq:        r.Seq + 1,
+		StoreID:    storeID,
+		ContextID:  r.Context,
+		WrapID:     r.WrapID,
+		ScryptN:    r.ScryptN,
+		ScryptR:    r.ScryptR,
+		ScryptP:    r.ScryptP,
+		Master:     master,
+		Passphrase: passphrase,
+		Keys:       staged,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -514,16 +521,16 @@ func (r *Keyring) DropKeys(drop []uint32, storeID [16]byte, master, passphrase [
 		}
 	}
 	return Seal(SealOptions{
-		KDF:            r.KDF,
-		Seq:            r.Seq + 1,
-		StoreID:        storeID,
-		ContextID:      r.Context,
-		WrapID:         r.WrapID,
-		ArgonTime:      r.ArgonTime,
-		ArgonMemoryKiB: r.ArgonMemoryKiB,
-		ArgonThreads:   r.ArgonThreads,
-		Master:         master,
-		Passphrase:     passphrase,
-		Keys:           kept,
+		KDF:        r.KDF,
+		Seq:        r.Seq + 1,
+		StoreID:    storeID,
+		ContextID:  r.Context,
+		WrapID:     r.WrapID,
+		ScryptN:    r.ScryptN,
+		ScryptR:    r.ScryptR,
+		ScryptP:    r.ScryptP,
+		Master:     master,
+		Passphrase: passphrase,
+		Keys:       kept,
 	})
 }

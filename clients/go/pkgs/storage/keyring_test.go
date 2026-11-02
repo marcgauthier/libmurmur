@@ -100,21 +100,20 @@ func TestVectorTamperMatrix(t *testing.T) {
 	}
 }
 
-func TestVectorArgon2HeaderFailsAuth(t *testing.T) {
+func TestLegacyArgon2HeaderRejected(t *testing.T) {
 	store, context, _, _, _ := vecIDs(t)
 	raw := mustHex(t, vec_argon2_hdrHex)
-	// Valid argon2id header, garbage body: real Argon2id runs, then the
-	// tag check fails. Any passphrase exercises the same path.
-	if _, err := Open(raw, nil, []byte("pass"), store, context); err != ErrAuth {
-		t.Fatalf("err=%v, want ErrAuth", err)
+	// Legacy KDF ID 1 is unsupported, regardless of its parameters or password.
+	if _, err := Open(raw, nil, []byte("pass"), store, context); err != ErrCorrupt {
+		t.Fatalf("err=%v, want ErrCorrupt", err)
 	}
-	// Empty passphrase never reaches Argon2.
-	if _, err := Open(raw, nil, nil, store, context); err != ErrAuth {
-		t.Fatalf("err=%v, want ErrAuth", err)
+	// Legacy KDF IDs are rejected even with an empty password.
+	if _, err := Open(raw, nil, nil, store, context); err != ErrCorrupt {
+		t.Fatalf("err=%v, want ErrCorrupt", err)
 	}
 }
 
-func TestVectorArgon2ZeroParamsFailsFast(t *testing.T) {
+func TestLegacyArgon2ZeroParamsRejected(t *testing.T) {
 	store, context, _, _, _ := vecIDs(t)
 	raw := mustHex(t, vec_argon2_zeroparamsHex)
 	if _, err := Open(raw, nil, []byte("pass"), store, context); err != ErrCorrupt {
@@ -175,10 +174,10 @@ func TestCreateRotateDropRoundTrip(t *testing.T) {
 	}
 }
 
-func TestArgon2RoundTrip(t *testing.T) {
+func TestScryptRoundTrip(t *testing.T) {
 	var store, context [16]byte
 	env, err := Create(CreateOptions{
-		KDF: KDFArgon2ID, ArgonTime: 1, ArgonMemoryKiB: 8192, ArgonThreads: 1,
+		KDF: KDFScrypt, ScryptN: 1024, ScryptR: 8, ScryptP: 1,
 		StoreID: store, ContextID: context, Passphrase: []byte("s3cret"),
 	})
 	if err != nil {
@@ -188,8 +187,8 @@ func TestArgon2RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if ring.KDF != KDFArgon2ID || ring.Current != 1 {
-		t.Fatalf("argon ring: %+v", ring.KDF)
+	if ring.KDF != KDFScrypt || ring.Current != 1 {
+		t.Fatalf("scrypt ring: %+v", ring.KDF)
 	}
 	if _, err := Open(env, nil, []byte("wrong"), store, context); err != ErrAuth {
 		t.Fatalf("wrong passphrase err=%v, want ErrAuth", err)

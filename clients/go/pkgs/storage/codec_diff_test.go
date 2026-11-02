@@ -41,7 +41,7 @@ func TestCodecRecordDifferential(t *testing.T) {
 			return b
 		},
 	}
-	for _, cipher := range []Cipher{CipherAES256GCM, CipherAEGIS256} {
+	for _, cipher := range []Cipher{CipherAES256GCM} {
 		for _, sealed := range []bool{false, true} {
 			for _, level := range []int32{0, 3} {
 				var master, page, active, k5, k6 [32]byte
@@ -199,21 +199,21 @@ func TestCodecReconfigure(t *testing.T) {
 	if rc != 0 || rec[4] != 1 {
 		t.Fatalf("compressed seal: rc=%d", rc)
 	}
-	if nvfs.CodecSetCipher(h, 2) != 0 {
-		t.Fatal("set cipher")
+	if nvfs.CodecSetCipher(h, 2) == 0 {
+		t.Fatal("removed cipher accepted")
 	}
 	rec, rc = nvfs.CodecSeal(h, 3, block)
-	if rc != 0 || string(rec[:4]) != "EXP2" {
-		t.Fatalf("aegis seal: rc=%d", rc)
+	if rc != 0 || string(rec[:4]) != "EXP1" {
+		t.Fatalf("AES seal: rc=%d", rc)
 	}
 	if nvfs.CodecInstallRing(h, active[:], 11, nil, nil) != 0 {
 		t.Fatal("install ring")
 	}
 	rec, rc = nvfs.CodecSeal(h, 3, block)
-	if rc != 0 || string(rec[:4]) != "EXP4" {
+	if rc != 0 || string(rec[:4]) != "EXP3" {
 		t.Fatalf("keyed seal: rc=%d", rc)
 	}
-	plain, err := Decrypt(CipherAEGIS256, active, 3, rec)
+	plain, err := Decrypt(CipherAES256GCM, active, 3, rec)
 	if err != nil || !bytes.Equal(plain, block) {
 		t.Fatalf("keyed round-trip: %v", err)
 	}

@@ -1,9 +1,2 @@
-set(CMAKE_SYSTEM_NAME Windows)
-set(CMAKE_SYSTEM_PROCESSOR AMD64)
-set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc-posix)
-set(CMAKE_CXX_COMPILER "${CMAKE_CURRENT_LIST_DIR}/win64-cxx")
-set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
-set(CMAKE_FIND_ROOT_PATH /usr/x86_64-w64-mingw32)
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+# Compatibility entry point; shared toolchain configuration lives at the root.
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/mingw-w64.cmake")

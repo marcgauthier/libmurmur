@@ -34,7 +34,7 @@ def execute(store, *commands, secret=phrase, success=True, linux=False):
 with tempfile.TemporaryDirectory(prefix="murmur-win64-") as tmp:
     root = Path(tmp)
     store = root / "store with spaces"
-    assert execute(store, "CREATE TABLE t(v); INSERT INTO t VALUES(42); PRAGMA murmur_kdf;") == "argon2id\n"
+    assert execute(store, "CREATE TABLE t(v); INSERT INTO t VALUES(42); PRAGMA murmur_kdf;") == "scrypt\n"
     assert execute(store, "SELECT v FROM t;") == "42\n"
     execute(store, "SELECT v FROM t;", secret="wrong passphrase", success=False)
     for command in ("backup", "save", "clone"):
@@ -53,8 +53,8 @@ with tempfile.TemporaryDirectory(prefix="murmur-win64-") as tmp:
     assert execute(store, f'.open "{winpath(attached)}"', "SELECT v FROM t;") == "8\n"
     execute(store, f'.open --readonly "{winpath(attached)}"', "INSERT INTO t VALUES(9);", success=False)
     aegis = root / "aegis"
-    execute(aegis, "PRAGMA cipher=aegis256; PRAGMA compression=zstd9; CREATE TABLE t(v); INSERT INTO t VALUES(55);")
-    assert execute(aegis, "PRAGMA cipher; SELECT v FROM t;") == "aegis256\n55\n"
+    execute(aegis, "PRAGMA cipher=aes256gcm; PRAGMA compression=zstd9; CREATE TABLE t(v); INSERT INTO t VALUES(55);")
+    assert execute(aegis, "PRAGMA cipher; SELECT v FROM t;") == "aes256gcm\n55\n"
     execute(store, "PRAGMA journal_mode=WAL;", success=False)
     missing = root / "missing"
     execute(store, f'.restore "{winpath(missing)}"', success=False)

@@ -57,7 +57,7 @@ with port-native fields:
 ## Credentials
 
 Every secret resolves to a 32-byte master: 64 hex chars decode
-raw, anything else hashes with SHA-256. Argon2id envelopes
+raw, anything else hashes with SHA-256. scrypt envelopes
 stretch those master bytes; direct envelopes use them in HKDF.
 The reference branches string passphrases on the envelope KDF;
 this port has no string-passphrase open path, so the mapping is

@@ -2,7 +2,7 @@
 
 This benchmark depends on the small Rust client in `clients/rust`, which calls
 the public `libmurmur` C ABI. The client crate has no third-party dependencies.
-It uses the Murmur VFS, AEGIS-256, Zstandard level 3, and cr-sqlite CRDT
+It uses the Murmur VFS, AES-256-GCM, Zstandard level 3, and cr-sqlite CRDT
 tracking. The workload is four reads and one insert (80% reads / 20% writes),
 with batch sizes 1 and 100.
 

@@ -18,7 +18,6 @@ github.com/quic-go/quic-go/qlogwriter/jsontext
 github.com/quic-go/quic-go/quicvarint
 # golang.org/x/crypto v0.41.0
 ## explicit; go 1.23.0
-golang.org/x/crypto/argon2
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305

@@ -2,7 +2,7 @@
  *
  * libmurmur.a packs every native Murmur component into one archive:
  * SQLite, cr-sqlite (C wrapper + Rust bundle), the page codec
- * (AEGIS-256 + Zstandard), the keyring, Argon2, the C++ VFS/storage
+ * (AES-256-GCM + Zstandard), the keyring, scrypt, the C++ VFS/storage
  * managers, and the picoquic+picotls+mbedTLS QUIC transport (RocksDB
  * is repacked from its own archive). Clients - the Go client in
  * clients/go, or a pure-C application - link this one file.

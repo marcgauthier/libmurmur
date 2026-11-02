@@ -9,8 +9,8 @@
 package nvfs
 
 /*
-#cgo CFLAGS: -I../../../../deps/rocksdb/include -I../../../../deps/sqlite -I../../../../deps/codec -I../../../../deps/zstd -I../../../../deps/argon2 -O2
-#cgo CXXFLAGS: -std=c++17 -I../../../../deps/rocksdb/include -I../../../../deps/codec -I../../../../deps/aegis/src/include -I../../../../deps/zstd -I../../../../deps/argon2 -I../../../../deps/keyring -O2
+#cgo CFLAGS: -I../../../../deps/rocksdb/include -I../../../../deps/sqlite -I../../../../deps/codec -I../../../../deps/zstd -O2
+#cgo CXXFLAGS: -std=c++17 -I../../../../deps/rocksdb/include -I../../../../deps/codec -I../../../../deps/zstd -I../../../../deps/keyring -O2
 #cgo LDFLAGS: ${SRCDIR}/../../../../libmurmur.a -lstdc++ -lpthread -ldl -lm
 #include <stdlib.h>
 #include <stdint.h>
@@ -94,11 +94,6 @@ import (
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/nvapi"
 	"github.com/marcgauthier/libmurmur/clients/go/bindings/sqlite"
 
-	// Symbol homes for the C++ codec: the codec calls ZSTD_* and
-	// aegis_* across the final link, and these edges pull those
-	// objects into every binary (including this package's tests)
-	// instead of relying on incidental imports.
-	_ "github.com/marcgauthier/libmurmur/clients/go/bindings/aegis"
 	_ "github.com/marcgauthier/libmurmur/clients/go/bindings/zstd"
 )
 

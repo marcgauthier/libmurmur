@@ -5,7 +5,7 @@
  * SQLite API and the murmur control API. No per-page callbacks into
  * Go: key material is provisioned once at create/rekey time.
  *
- * Record layouts mirror pkgs/storage/crypto.go exactly (EXP1-EXP4); the Go
+ * Record layouts mirror pkgs/storage/crypto.go exactly (EXP1/EXP3); the Go
  * engine stays the differential oracle until the staged path is gone.
  */
 #ifndef MURMUR_CODEC_H
@@ -21,13 +21,11 @@ extern "C" {
 /* Ciphers mirror storage.Cipher. */
 enum {
   MURMUR_CIPHER_AES256GCM = 1,
-  MURMUR_CIPHER_AEGIS256 = 2,
 };
 
 typedef struct MurmurCodec MurmurCodec;
 
-/* Creates a codec, copying all key material. cipher is 1 (AES-256-GCM)
- * or 2 (AEGIS-256); level is 0 (no compression) or 1..22 (zstd).
+/* Creates a codec, copying all key material. cipher is 1 (AES-256-GCM); level is 0 (no compression) or 1..22 (zstd).
  * page_key seals legacy records (master when unsealed, active data key
  * when sealed). sealed!=0 installs the ring trial set (active data key
  * + current id + retired keys); master backs legacy records on sealed
@@ -61,7 +59,7 @@ int murmur_codec_seal_as(MurmurCodec *c, uint64_t page,
                          const uint8_t in[4096], uint8_t *out, size_t out_cap,
                          uint32_t key_id, size_t *payload_len);
 
-/* Peeks the data-key id of a keyed (EXP3/EXP4) record into *key_id.
+/* Peeks the data-key id of a keyed (EXP3) record into *key_id.
  * Returns 1 when keyed, 0 for legacy/corrupt/short records. */
 int murmur_record_key_id(const uint8_t *in, size_t in_len, uint32_t *key_id);
 

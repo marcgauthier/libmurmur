@@ -105,12 +105,12 @@ func TestOpenOptions(t *testing.T) {
 	}
 	defer Unregister()
 	dir := filepath.Join(t.TempDir(), "opts")
-	db, rc := Open(dir, &OpenOptions{Cipher: "aegis256", Compression: "zstd6"})
+	db, rc := Open(dir, &OpenOptions{Cipher: "aes256gcm", Compression: "zstd6"})
 	if rc != CodeOK {
 		t.Fatalf("open with options: %d", rc)
 	}
 	defer Close(db)
-	if got := queryOne(t, db, "PRAGMA cipher"); got != "aegis256" {
+	if got := queryOne(t, db, "PRAGMA cipher"); got != "aes256gcm" {
 		t.Fatalf("cipher = %q", got)
 	}
 	if got := queryOne(t, db, "PRAGMA compression"); got != "zstd6" {
@@ -374,11 +374,11 @@ func TestControlPaths(t *testing.T) {
 	if rc != CodeOK || kp.Sealed {
 		t.Fatalf("keyring params = %+v rc=%d, want unsealed", kp, rc)
 	}
-	if rc := SetKeyringParam(dir, 2, 5); rc != CodeOK {
-		t.Fatalf("keyring set kdf_time: %d", rc)
+	if rc := SetKeyringParam(dir, 2, 16); rc != CodeOK {
+		t.Fatalf("keyring set scrypt_n: %d", rc)
 	}
 	kp, rc = KeyringParamsFor(dir)
-	if rc != CodeOK || kp.Time != 5 {
+	if rc != CodeOK || kp.Time != 16 {
 		t.Fatalf("staged time = %+v rc=%d", kp, rc)
 	}
 	if id, rc := KeyringRotate(dir); rc == CodeOK || id != 0 {

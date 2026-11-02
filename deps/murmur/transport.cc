@@ -16,14 +16,9 @@
 
 #include "transport.h"
 
-#include <arpa/inet.h>
+#include "platform_net.h"
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -248,8 +243,9 @@ struct PendingDial {
 
 struct Endpoint {
     picoquic_quic_t* quic = NULL;
-    int sock = -1;
-    int wake_pipe[2] = { -1, -1 };
+    murmur_socket_t sock = MURMUR_INVALID_SOCKET;
+    bool net_started = false;
+    murmur_socket_t wake_pipe[2] = { MURMUR_INVALID_SOCKET, MURMUR_INVALID_SOCKET };
     std::thread pump;
     std::atomic<bool> stop{ false };
     std::mutex mu; // guards cmd_q, sessions, pending, accept_q, err
@@ -734,7 +730,7 @@ void enqueue(Endpoint* ep, std::function<void()> fn)
         ep->cmd_q.push_back(std::move(fn));
     }
     uint8_t b = 1;
-    ssize_t w = write(ep->wake_pipe[1], &b, 1); // non-blocking; best effort
+    ssize_t w = send(ep->wake_pipe[1], (const char*)&b, 1, 0); // non-blocking; best effort
     (void)w;
 }
 
@@ -755,7 +751,7 @@ void pump_send(Endpoint* ep)
         socklen_t sl = (to.ss_family == AF_INET6)
             ? sizeof(struct sockaddr_in6)
             : sizeof(struct sockaddr_in);
-        (void)sendto(ep->sock, buf, len, 0, (struct sockaddr*)&to, sl);
+        (void)sendto(ep->sock, (const char*)buf, (int)len, 0, (struct sockaddr*)&to, sl);
     }
 }
 
@@ -767,7 +763,7 @@ void pump_recv(Endpoint* ep, const struct sockaddr* local, socklen_t local_len)
         struct sockaddr_storage from;
         socklen_t sl = sizeof(from);
         ssize_t n = recvfrom(
-            ep->sock, buf, sizeof(buf), MSG_DONTWAIT, (struct sockaddr*)&from, &sl);
+            ep->sock, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&from, &sl);
         if (n <= 0)
             break;
         picoquic_incoming_packet(ep->quic, buf, (size_t)n,
@@ -803,15 +799,15 @@ void pump_loop(Endpoint* ep)
         int timeout_ms = delay_us < 0 ? 1
             : delay_us > 50 * 1000      ? 50
                                         : (int)(delay_us / 1000);
-        struct pollfd pf[2];
+        murmur_pollfd pf[2] = {};
         pf[0].fd = ep->sock;
         pf[0].events = POLLIN;
         pf[1].fd = ep->wake_pipe[0];
         pf[1].events = POLLIN;
-        if (poll(pf, 2, timeout_ms) > 0) {
+        if (murmur_poll(pf, 2, timeout_ms) > 0) {
             if (pf[1].revents & POLLIN) {
                 uint8_t drain[64];
-                while (read(ep->wake_pipe[0], drain, sizeof(drain)) > 0) {
+                while (recv(ep->wake_pipe[0], (char*)drain, sizeof(drain), 0) > 0) {
                 }
             }
             if (pf[0].revents & POLLIN)
@@ -931,7 +927,7 @@ void murmur_endpoint_destroy(Endpoint* ep)
     if (ep->pump.joinable()) {
         ep->stop.store(true);
         uint8_t b = 1;
-        ssize_t w = write(ep->wake_pipe[1], &b, 1);
+        ssize_t w = send(ep->wake_pipe[1], (const char*)&b, 1, 0);
         (void)w;
         ep->pump.join();
     }
@@ -942,14 +938,15 @@ void murmur_endpoint_destroy(Endpoint* ep)
     // The verifier dispose freed the CRL contents; free the head.
     free(ep->crl_head);
     ep->crl_head = NULL;
-    if (ep->sock >= 0) {
-        close(ep->sock);
-        ep->sock = -1;
+    if (ep->sock != MURMUR_INVALID_SOCKET) {
+        murmur_socket_close(ep->sock);
+        ep->sock = MURMUR_INVALID_SOCKET;
     }
-    if (ep->wake_pipe[0] >= 0)
-        close(ep->wake_pipe[0]);
-    if (ep->wake_pipe[1] >= 0)
-        close(ep->wake_pipe[1]);
+    if (ep->wake_pipe[0] != MURMUR_INVALID_SOCKET)
+        murmur_socket_close(ep->wake_pipe[0]);
+    if (ep->wake_pipe[1] != MURMUR_INVALID_SOCKET)
+        murmur_socket_close(ep->wake_pipe[1]);
+    if (ep->net_started) murmur_net_stop();
     delete ep;
 }
 
@@ -1013,14 +1010,23 @@ int murmur_quic_create_alpn(murmur_quic_t** out, const char* bind_ip,
     }
     ep->max_streams = (sessions == 0 ? 32 : sessions) + 8;
 
+    if (murmur_net_start() != 0) return fail(-MURMUR_QUIC_BUSY);
+    ep->net_started = true;
+
     // UDP socket.
     bool want_v6 = bind_ip != NULL && strchr(bind_ip, ':') != NULL;
     ep->sock = socket(want_v6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
-    if (ep->sock < 0)
+    if (ep->sock == MURMUR_INVALID_SOCKET)
         return fail(-MURMUR_QUIC_BUSY);
     int one = 1;
+#ifdef _WIN32
+    // Windows SO_REUSEADDR permits another process to hijack this UDP port.
+    if (setsockopt(ep->sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+            (const char*)&one, sizeof(one)) != 0) return fail(-MURMUR_QUIC_BUSY);
+#else
     setsockopt(ep->sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    fcntl(ep->sock, F_SETFL, O_NONBLOCK);
+#endif
+    if (murmur_socket_nonblocking(ep->sock) != 0) return fail(-MURMUR_QUIC_BUSY);
     if (want_v6) {
         struct sockaddr_in6 a;
         memset(&a, 0, sizeof(a));
@@ -1089,14 +1095,13 @@ int murmur_quic_create_alpn(murmur_quic_t** out, const char* bind_ip,
     // endpoint accepts inbound connections, like any peer.
     picoquic_enforce_client_only(ep->quic, 0);
 
-    if (pipe(ep->wake_pipe) != 0) {
+    if (murmur_socket_pair(ep->wake_pipe) != 0) {
         murmur_endpoint_destroy(ep.release());
         return -MURMUR_QUIC_BUSY;
     }
     // Both ends non-blocking: the pump drains the read end in a loop
     // that must terminate (a blocking read wedges the pump forever).
-    fcntl(ep->wake_pipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(ep->wake_pipe[1], F_SETFL, O_NONBLOCK);
+
     ep->pump = std::thread(pump_loop, ep.get());
     *out = (murmur_quic_t*)ep.release();
     return 0;
