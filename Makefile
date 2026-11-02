@@ -465,33 +465,18 @@ $(BUILD)/searchtest: $(LIB) deps/murmur/search_selftest.c \
 	  -o $@
 
 # demo is the proving C client (N7 gate): two processes replicate a
-# Murmur store with no Go involved. See clients/c/demo/README.md.
-$(BUILD)/demo: $(LIB) clients/c/demo/demo.c libmurmur.h
+# Murmur store with no Go involved. See examples/c/README.md.
+$(BUILD)/demo: $(LIB) examples/c/demo.c libmurmur.h
 	@mkdir -p $(BUILD)
 	$(CC) $(OPT) -Wall -Wextra -I. -Ideps/murmur -Ideps/sqlite \
 	  -Ideps/keyring -Ideps/crsqlite/include \
-	  clients/c/demo/demo.c $(LIB) -lstdc++ -lm -ldl -lpthread \
+	  examples/c/demo.c $(LIB) -lstdc++ -lm -ldl -lpthread \
 	  -o $@
 
 demo: $(BUILD)/demo
 
 democheck: $(BUILD)/demo
-	sh clients/c/demo/check.sh
-
-# admin is the C operator CLI (N10): the 9 murmur-admin subcommands
-# over libmurmur.a with no Go involved.
-$(BUILD)/admin: $(LIB) clients/c/admin/admin.c libmurmur.h \
-    deps/murmur/store.h
-	@mkdir -p $(BUILD)
-	$(CC) $(OPT) -Wall -Wextra -I. -Ideps -Ideps/murmur -Ideps/keyring \
-	  -Ideps/sqlite \
-	  clients/c/admin/admin.c $(LIB) -lstdc++ -lm -ldl -lpthread \
-	  -o $@
-
-admin: $(BUILD)/admin
-
-admincheck: $(BUILD)/admin
-	sh clients/c/admin/check.sh
+	sh examples/c/check.sh
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(@D)
@@ -525,23 +510,20 @@ clean:
 # Reuse the vendored SQLite shell, patched only in the build directory.
 MURMUR_SHELL_BUILD := $(BUILD)/sqlite3-murmur-tool
 MURMUR_SHELL_BIN := $(MURMUR_SHELL_BUILD)/sqlite3-murmur
+MURMUR_TOOL_LIB := build/cmake-linux/libmurmur.a
+MURMUR_TOOL_BIN := sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur
 .PHONY: sqlite3-murmur-tool sqlite3-murmur-tool-check
-sqlite3-murmur-tool: $(MURMUR_SHELL_BIN)
+sqlite3-murmur-tool: sqlite3-murmur-tool-linux-bin
 
-# Release artifacts use the directory name requested by the CLI consumer;
-# sources remain in sqlite3-murmur-tool/.
-MURMUR_TOOL_DIST := sqlite-murmur-tool/bin/linux-x86_64
+# Package release artifacts alongside the CLI sources.
 .PHONY: sqlite3-murmur-tool-bin sqlite3-murmur-tool-linux-bin sqlite3-murmur-tool-win64-bin
 sqlite3-murmur-tool-bin: sqlite3-murmur-tool-linux-bin sqlite3-murmur-tool-win64-bin
 
 sqlite3-murmur-tool-win64-bin:
 	sh sqlite3-murmur-tool/build-win64.sh
 
-sqlite3-murmur-tool-linux-bin: $(MURMUR_SHELL_BIN)
-	@test "$$(uname -sm)" = "Linux x86_64" || { echo 'This packaging target requires Linux x86_64.' >&2; exit 1; }
-	@mkdir -p $(MURMUR_TOOL_DIST)
-	install -m 755 $(MURMUR_SHELL_BIN) $(MURMUR_TOOL_DIST)/sqlite3-murmur
-	cd $(MURMUR_TOOL_DIST) && sha256sum sqlite3-murmur > SHA256SUMS
+sqlite3-murmur-tool-linux-bin:
+	sh sqlite3-murmur-tool/build-linux.sh
 
 $(MURMUR_SHELL_BUILD)/shell.c: deps/sqlite/shell.c sqlite3-murmur-tool/shell.patch
 	@mkdir -p $(@D)
@@ -557,10 +539,21 @@ $(MURMUR_SHELL_BUILD)/tool.o: sqlite3-murmur-tool/tool.c sqlite3-murmur-tool/too
 	@mkdir -p $(@D)
 	$(CC) -std=c11 $(OPT) $(DEPFLAGS) -Wall -Wextra -Werror -I. -Ideps/sqlite -c $< -o $@
 
-$(MURMUR_SHELL_BIN): $(MURMUR_SHELL_BUILD)/shell.o $(MURMUR_SHELL_BUILD)/tool.o $(LIB)
+$(MURMUR_SHELL_BUILD)/admin.o: sqlite3-murmur-tool/admin.c sqlite3-murmur-tool/tool.h sqlite3-murmur-tool/keyprovider_windows.h
+	@mkdir -p $(@D)
+	$(CC) $(OPT) $(DEPFLAGS) -Wall -Wextra -Werror -I. -Ideps -Ideps/keyring -Ideps/sqlite -c $< -o $@
+
+.PHONY: sqlite3-murmur-tool-admin-check
+sqlite3-murmur-tool-admin-check: sqlite3-murmur-tool-linux-bin
+	sh sqlite3-murmur-tool/admin-check.sh
+
+$(MURMUR_SHELL_BIN): $(MURMUR_SHELL_BUILD)/shell.o $(MURMUR_SHELL_BUILD)/tool.o $(MURMUR_SHELL_BUILD)/admin.o $(LIB)
 	$(CC) $^ -lstdc++ -lm -ldl -lpthread -o $@
 
-$(MURMUR_SHELL_BUILD)/native-check: sqlite3-murmur-tool/native-check.c $(LIB)
+$(MURMUR_TOOL_LIB): sqlite3-murmur-tool-linux-bin
+	@test -f $@
+
+$(MURMUR_SHELL_BUILD)/native-check: sqlite3-murmur-tool/native-check.c $(MURMUR_TOOL_LIB)
 	@mkdir -p $(@D)
 	$(CC) $(OPT) -Wall -Wextra -Werror -I. -Ideps/sqlite $^ -lstdc++ -lm -ldl -lpthread -o $@
 
@@ -568,13 +561,13 @@ $(MURMUR_SHELL_BUILD)/check-extension.so: sqlite3-murmur-tool/check-extension.c 
 	@mkdir -p $(@D)
 	$(CC) $(OPT) -Wall -Wextra -Werror -fPIC -shared -Ideps/sqlite $< -o $@
 
-$(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault: sqlite3-murmur-tool/check-flush-fault.c $(MURMUR_SHELL_BUILD)/shell.o $(MURMUR_SHELL_BUILD)/tool.o $(LIB)
+$(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault: sqlite3-murmur-tool/check-flush-fault.c $(MURMUR_SHELL_BUILD)/shell.o $(MURMUR_SHELL_BUILD)/tool.o $(MURMUR_SHELL_BUILD)/admin.o $(MURMUR_TOOL_LIB)
 	$(CC) $(OPT) -Wall -Wextra -Werror -Ideps/sqlite $^ -Wl,--wrap=nvStoreFlush -lstdc++ -lm -ldl -lpthread -o $@
 
-sqlite3-murmur-tool-check: $(MURMUR_SHELL_BIN) $(MURMUR_SHELL_BUILD)/native-check $(MURMUR_SHELL_BUILD)/check-extension.so $(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault
-	python3 sqlite3-murmur-tool/check.py $(MURMUR_SHELL_BIN) $(MURMUR_SHELL_BUILD)/native-check $(MURMUR_SHELL_BUILD)/check-extension.so $(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault
+sqlite3-murmur-tool-check: sqlite3-murmur-tool-linux-bin $(MURMUR_SHELL_BUILD)/native-check $(MURMUR_SHELL_BUILD)/check-extension.so $(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault
+	python3 sqlite3-murmur-tool/check.py $(MURMUR_TOOL_BIN) $(MURMUR_SHELL_BUILD)/native-check $(MURMUR_SHELL_BUILD)/check-extension.so $(MURMUR_SHELL_BUILD)/sqlite3-murmur-fault
 
--include $(MURMUR_SHELL_BUILD)/shell.d $(MURMUR_SHELL_BUILD)/tool.d
+-include $(MURMUR_SHELL_BUILD)/shell.d $(MURMUR_SHELL_BUILD)/tool.d $(MURMUR_SHELL_BUILD)/admin.d
 
 # Go client gates. The library is always built first.
 go-build: $(LIB)

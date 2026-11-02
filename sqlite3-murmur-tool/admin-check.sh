@@ -1,13 +1,19 @@
 #!/bin/sh
 # admincheck: exercises all 9 murmur-admin subcommands on scratch stores.
 set -u
-ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-ADMIN="$ROOT/build/admin"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CLI="${MURMUR_ADMIN_CLI:-$ROOT/sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur}"
+admin() { "$CLI" --admin "$@"; }
+ADMIN=admin
 TMP="$(mktemp -d /tmp/murmur-admincheck-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 fail() { echo "ADMINCHECK-FAIL: $1" >&2; exit 1; }
 pass() { echo "ADMINCHECK-OK: $1"; }
+
+# Both modes must be reachable through the same executable.
+"$CLI" --admin --help | grep -q 'sqlite3-murmur --admin' || fail "admin help"
+[ "$("$CLI" -batch -noinit :memory: 'SELECT 42;')" = 42 ] || fail "SQL dispatch"
 
 KEY=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 NEWKEY=ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100
@@ -18,7 +24,7 @@ NEWGROUP=08080808080808080808080808080808
 
 # Fixture store builder.
 cc -O1 -g -I"$ROOT" -I"$ROOT/deps" -I"$ROOT/deps/murmur" -I"$ROOT/deps/sqlite" \
-  "$ROOT/clients/c/admin/mkstore.c" "$ROOT/libmurmur.a" \
+  "$ROOT/sqlite3-murmur-tool/admin-mkstore.c" "$ROOT/build/cmake-linux/libmurmur.a" \
   -lstdc++ -lm -ldl -lpthread -o "$TMP/mkstore" || fail "mkstore build"
 "$TMP/mkstore" "$TMP/store" "$KEY" "$NODE" "$GROUP" seal >/dev/null || fail "mkstore run"
 

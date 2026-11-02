@@ -74,17 +74,15 @@ else()
   target_link_libraries(murmur PUBLIC m)
 endif()
 if(MURMUR_COMPILE_CHECK_ONLY)
-  add_library(murmur-tools-check OBJECT clients/c/admin/admin.c clients/c/demo/demo.c
+  add_library(murmur-tools-check OBJECT sqlite3-murmur-tool/admin.c examples/c/demo.c
     sqlite3-murmur-tool/tool.c)
   target_include_directories(murmur-tools-check PRIVATE . deps deps/sqlite deps/murmur
     deps/keyring deps/crsqlite/include)
   return()
 endif()
-foreach(tool demo admin)
-  add_executable(murmur-${tool} clients/c/${tool}/${tool}.c)
-  target_include_directories(murmur-${tool} PRIVATE deps/keyring deps/crsqlite/include)
-  target_link_libraries(murmur-${tool} PRIVATE murmur::murmur)
-endforeach()
+add_executable(murmur-demo examples/c/demo.c)
+target_include_directories(murmur-demo PRIVATE deps/keyring deps/crsqlite/include)
+target_link_libraries(murmur-demo PRIVATE murmur::murmur)
 
 # Merge rather than extract archives: dependencies contain repeated member names.
 add_custom_command(TARGET murmur POST_BUILD

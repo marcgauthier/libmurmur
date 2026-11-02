@@ -1,6 +1,6 @@
 #!/bin/sh
 # democheck - run two demo processes and prove rows replicate.
-# Usage: sh clients/c/demo/check.sh  (from the repo root)
+# Usage: sh examples/c/check.sh  (from the repo root)
 set -u
 TD=deps/murmur/testdata
 GROUP=07070707070707070707070707070707

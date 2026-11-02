@@ -4,9 +4,9 @@
 *.a
 /bin/
 /build/
-/sqlite-murmur-tool/bin/linux-x86_64/
-/sqlite-murmur-tool/bin/win64/*.exe
-/sqlite-murmur-tool/bin/win64/SHA256SUMS
+/sqlite3-murmur-tool/bin/linux-x86_64/
+/sqlite3-murmur-tool/bin/win64/*.exe
+/sqlite3-murmur-tool/bin/win64/SHA256SUMS
 
 # Go build cache and coverage
 coverage.out

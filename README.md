@@ -18,7 +18,7 @@ Instead of writing SQLite pages to a standard filesystem file, libmurmur impleme
 - **Rich Native Ecosystem**:
   - **Vector & Full-Text Search**: In-process embeddings similarity via `vec0` alongside SQLite `FTS5`.
   - **File Object Storage**: Large binary payloads stored with CRR metadata and stream-replicated over QUIC.
-  - **CLI Tools**: Interactive `sqlite3-murmur` shell for encrypted store inspection and `murmur-admin` for maintenance.
+  - **CLI Tools**: `sqlite3-murmur` shell for SQL and `--admin` commands for storage maintenance.
   - **Language Bindings**: Native C ABI, zero-dependency Rust client, and idiomatic Go package (`murmurdb`).
 
 AES page records and direct-HKDF keyrings retain their established format.
@@ -46,8 +46,8 @@ Password keyrings now use a distinct scrypt format ID; see the migration notes.
     file objects + fetch (`files`, `fetch`, `filecodec`,
     `postcard`), search (`search` over FTS5 + vec0), offline
     tools (`offline`), each with a `*_selftest.c`.
-- `clients/c/` — C client: `demo/` (two-node replication without
-  any Go) and `admin/` (the 9 `murmur-admin` subcommands).
+- `examples/c/` — C embedding demo with two-node replication, without Go.
+- `sqlite3-murmur-tool/` — SQL shell and storage administration in one executable.
 - `clients/rust/` — dependency-free Rust client over the C ABI.
 - `clients/go/` — Go client: thin cgo bindings plus the Go
   implementation kept as a test reference/oracle; shrinking
@@ -86,11 +86,11 @@ make selftest     # MEMBER/FRAMING/MSGCODEC/PC/SYNC/AES/DRIVER/
 
 # C proofs: two-node replication and the admin CLI, no Go involved.
 make democheck    # DEMO-OK
-make admincheck   # ADMINCHECK-OK (11 groups, 9 subcommands)
+make sqlite3-murmur-tool-admin-check   # ADMINCHECK-OK (11 groups, 9 subcommands)
 
 # SQLite's shell with encrypted/compressed Murmur storage.
 make sqlite3-murmur-tool
-./build/sqlite3-murmur-tool/sqlite3-murmur ./my-store
+./sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur ./my-store
 make sqlite3-murmur-tool-check
 
 # Go client + reference implementation.

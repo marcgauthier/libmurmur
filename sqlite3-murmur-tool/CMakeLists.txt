@@ -15,10 +15,13 @@ add_library(murmur-shell OBJECT "${CMAKE_CURRENT_BINARY_DIR}/shell.c")
 target_compile_definitions(murmur-shell PRIVATE main=murmur_sqlite_shell_main
   SQLITE_SHELL_INIT_PROC=murmur_tool_init SQLITE_ENABLE_FTS5)
 target_include_directories(murmur-shell PRIVATE "${ROOT}/deps/sqlite" "${CMAKE_CURRENT_SOURCE_DIR}")
-add_executable(sqlite3-murmur tool.c $<TARGET_OBJECTS:murmur-shell>)
+add_executable(sqlite3-murmur tool.c admin.c $<TARGET_OBJECTS:murmur-shell>)
 if(WIN32)
+  # Ship a standalone executable without MinGW runtime DLLs.
+  target_link_options(sqlite3-murmur PRIVATE -static -static-libgcc -static-libstdc++)
   enable_language(RC)
   target_sources(sqlite3-murmur PRIVATE win64.rc)
 endif()
-target_include_directories(sqlite3-murmur PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(sqlite3-murmur PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${ROOT}/deps" "${ROOT}/deps/keyring")
 target_link_libraries(sqlite3-murmur PRIVATE murmur::murmur)

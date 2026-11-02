@@ -1,11 +1,18 @@
-# murmur-admin (C)
+# Storage administration
 
 Operational CLI for murmur stores. C port of
-`cmd/murmur-admin`: the same 9 subcommands, flags, and report style,
+the original admin client: the same 9 subcommands, flags, and report style,
 linked against `libmurmur.a` with no Go involved.
 
-Build: `make admin`. Exercise: `make admincheck` (11 groups: all 9
+Build: `make sqlite3-murmur-tool`. Exercise: `make sqlite3-murmur-tool-admin-check` (11 groups: all 9
 commands in text and JSON, credential providers, error paths).
+
+Run commands through the combined executable:
+
+```sh
+sqlite3-murmur --admin --help
+sqlite3-murmur --admin --json status ./my-store
+```
 
 ## Commands
 

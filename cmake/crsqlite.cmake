@@ -18,12 +18,12 @@ else()
     "${PROJECT_SOURCE_DIR}/deps/crsqlite/rs/*.lock"
     "${PROJECT_SOURCE_DIR}/deps/crsqlite/rs/*.h")
   add_custom_command(OUTPUT "${MURMUR_CRSQL_ARCHIVE}"
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/build_crsqlite.py"
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/sqlite3-murmur-tool/build_crsqlite.py"
       --cargo "${MURMUR_CARGO}" --cc "${CMAKE_C_COMPILER}" --target "${crsql_rust_target}"
       --target-dir "${CMAKE_CURRENT_BINARY_DIR}/crsqlite/cargo"
       --nm "${CMAKE_NM}" --objcopy "${CMAKE_OBJCOPY}" --output "${MURMUR_CRSQL_ARCHIVE}"
     DEPENDS ${crsql_rust_sources} "${PROJECT_SOURCE_DIR}/deps/crsqlite/UPSTREAM.json"
-      "${PROJECT_SOURCE_DIR}/tools/build_crsqlite.py" VERBATIM)
+      "${PROJECT_SOURCE_DIR}/sqlite3-murmur-tool/build_crsqlite.py" VERBATIM)
   add_custom_target(murmur-crsqlite-build DEPENDS "${MURMUR_CRSQL_ARCHIVE}")
 endif()
 add_library(murmur-crsqlite-core STATIC IMPORTED GLOBAL)

@@ -7,13 +7,16 @@ Build from the repository root:
 
 ```sh
 make -j4 sqlite3-murmur-tool
-./build/sqlite3-murmur-tool/sqlite3-murmur ./my-store
+./sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur ./my-store
 ```
+
+The Linux build uses CMake to build the vendored dependencies and packages the
+executable in `sqlite3-murmur-tool/bin/linux-x86_64/`.
 
 `make sqlite3-murmur-tool-bin` works here or from the repository root and
 packages Linux x86-64 and Windows x64 executables with SHA-256 checksums in
-`bin/linux-x86_64/` and `bin/win64/`. This directory's `bin` links to
-`../sqlite-murmur-tool/bin`. For only Linux, use
+`sqlite3-murmur-tool/bin/linux-x86_64/` and
+`sqlite3-murmur-tool/bin/win64/` in the repository. For only Linux, use
 `make sqlite3-murmur-tool-linux-bin`; for Windows, use
 `make sqlite3-murmur-tool-win64-bin`.
 
@@ -36,25 +39,28 @@ The backup is another encrypted Murmur directory and opens with the same
 passphrase. `.save`, `.clone`, `.restore`, and `VACUUM INTO` also operate on
 Murmur stores. These are SQLite-level database copies, not operational
 backup archives with a replication manifest. Replication is not started
-automatically. Continue using the existing admin client for operational
-backups, passphrase changes, key management, and repair.
+automatically. Use [the built-in `--admin` commands](ADMIN.md) for operational backups,
+passphrase changes, key management, verification, compaction, and repair.
+For example: `sqlite3-murmur --admin --json status ./my-store`.
+Admin mode uses the credential flags documented there; shell mode uses the
+hidden prompt or `--passphrase-fd`.
 
 For scripting, provide one nonempty passphrase line through an open file
 descriptor (maximum 4096 bytes; LF or CRLF is removed). For example, with
 an existing passphrase file whose access you control:
 
 ```sh
-./build/sqlite3-murmur-tool/sqlite3-murmur \
+./sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur \
   --passphrase-fd 3 ./my-store 'SELECT * FROM example;' 3<./passphrase.txt
 
-./build/sqlite3-murmur-tool/sqlite3-murmur \
+./sqlite3-murmur-tool/bin/linux-x86_64/sqlite3-murmur \
   --passphrase-fd 3 ./my-store 3<./passphrase.txt <./commands.sql
 ```
 
 Without a controlling terminal, encrypted access requires
 `--passphrase-fd N`. `:memory:`, help, and version do not need a credential.
 Passphrase bytes are preserved, including spaces and UTF-8. For compatibility
-with `murmur-admin`, exactly 64 hexadecimal characters decode to a raw
+with `--admin`, exactly 64 hexadecimal characters decode to a raw
 32-byte key; all other input is hashed with SHA-256. The resulting value
 is supplied to libmurmur's existing key API. **New stores additionally use
 the native salted scrypt keyring** (N=65536, r=8, p=1; approximately 64 MiB).
@@ -96,9 +102,10 @@ Persistent database operations support Murmur stores only:
   present in the vendored build. No new line-editing or archive library is
   introduced.
 
-The Linux build uses the existing native toolchain and `patch`. The Windows
-cross-build uses the root CMake build and MinGW, including the full library
-and its replication/transport objects. It builds the vendored upstream cr-sqlite source for Windows. The CLI test suite additionally uses Python 3's standard library.
+Both platform builds use CMake and `patch` to build the full library and
+vendored dependencies. Linux uses the native C/C++ toolchain; the Windows
+cross-build uses MinGW. The vendored cr-sqlite core requires its pinned Rust
+toolchain. The CLI test suite additionally uses Python 3's standard library.
 
 ```sh
 make sqlite3-murmur-tool-check

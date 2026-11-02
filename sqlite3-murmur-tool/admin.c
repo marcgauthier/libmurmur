@@ -1,7 +1,7 @@
-/* murmur-admin: operational CLI for murmur stores (C port of
- * cmd/murmur-admin). Same 9 subcommands, flags, and report style;
+/* Storage administration for sqlite3-murmur, ported from the original
+ * admin client. Same 9 subcommands, flags, and report style;
  * reports are adapted to this port's RocksDB storage substrate (see
- * README.md for the field mapping). Links libmurmur.a only.
+ * ADMIN.md for the field mapping). Links libmurmur.a only.
  *
  * Credential rule: every secret resolves to a 32-byte master (64 hex
  * chars decode raw, anything else hashes with SHA-256). scrypt
@@ -29,6 +29,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "tool.h"
 #include "libmurmur.h"
 #include "murmur/offline.h"
 #include "murmur/open.h"
@@ -61,7 +62,7 @@ static void print_usage(void) {
   printf("Murmur Operational Admin CLI (v%s)\n"
          "\n"
          "Usage:\n"
-         "  murmur-admin <command> [options] [arguments]\n"
+         "  sqlite3-murmur --admin <command> [options] [arguments]\n"
          "\n"
          "Commands:\n"
          "  status   <data-dir>                      Database status and storage/SQLite metrics\n"
@@ -2486,7 +2487,7 @@ static int run(int argc, char **argv) {
       print_usage();
       return 0;
     } else if (strcmp(arg, "-v") == 0 || strcmp(arg, "--version") == 0) {
-      printf("murmur-admin version %s\n", kVersion);
+      printf("sqlite3-murmur --admin version %s\n", kVersion);
       return 0;
     } else if (strcmp(arg, "--json") == 0) {
       o.json = 1;
@@ -2571,49 +2572,49 @@ static int run(int argc, char **argv) {
     int rc = -1;
     if (strcmp(cmd, "status") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "status <data-dir>");
       } else {
         rc = cmd_status(args[0], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "inspect") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "inspect <data-dir>");
       } else {
         rc = cmd_inspect(args[0], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "verify") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "verify <data-dir> [--backup]");
       } else {
         rc = cmd_verify(args[0], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "backup") == 0) {
       if (nargs < 2) {
-        snprintf(err, sizeof(err), "missing arguments. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing arguments. Usage: sqlite3-murmur --admin "
                                    "backup <source-dir> <dest-dir>");
       } else {
         rc = cmd_backup(args[0], args[1], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "restore") == 0) {
       if (nargs < 2) {
-        snprintf(err, sizeof(err), "missing arguments. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing arguments. Usage: sqlite3-murmur --admin "
                                    "restore <backup-dir> <dest-dir>");
       } else {
         rc = cmd_restore(args[0], args[1], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "keys") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "keys <data-dir>");
       } else {
         rc = cmd_keys(args[0], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "rekey") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "rekey <data-dir> --new-passphrase <str> | "
                                    "--new-key-hex <hex>");
       } else {
@@ -2621,21 +2622,21 @@ static int run(int argc, char **argv) {
       }
     } else if (strcmp(cmd, "compact") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "compact <data-dir> [--max-passes <n>]");
       } else {
         rc = cmd_compact(args[0], &o, err, sizeof(err));
       }
     } else if (strcmp(cmd, "repair") == 0) {
       if (nargs == 0) {
-        snprintf(err, sizeof(err), "missing <data-dir>. Usage: murmur-admin "
+        snprintf(err, sizeof(err), "missing <data-dir>. Usage: sqlite3-murmur --admin "
                                    "repair <data-dir> [--out <dir>]");
       } else {
         rc = cmd_repair(args[0], &o, err, sizeof(err));
       }
     } else {
       snprintf(err, sizeof(err),
-               "unknown command: \"%s\". Run 'murmur-admin --help' for usage.",
+               "unknown command: \"%s\". Run 'sqlite3-murmur --admin --help' for usage.",
                cmd);
     }
     if (rc != 0) {
@@ -2660,7 +2661,7 @@ fail:
   return 1;
 }
 
-int main(int argc, char **argv) {
+int murmur_admin_main(int argc, char **argv) {
   if (murmur_init() != 0) {
     fprintf(stderr, "Error: murmur_init failed\n");
     return 1;

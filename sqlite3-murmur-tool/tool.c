@@ -62,6 +62,7 @@ int murmur_tool_exiting(void) { return exit_requested; }
 
 void murmur_tool_usage(void) {
   fprintf(stderr,
+      "  --admin COMMAND ...  Run storage administration (--admin --help)\n"
       "Murmur storage: encrypted RocksDB directories only.\n"
       "  --passphrase-fd N   Read one passphrase line from descriptor N\n"
       "Otherwise a hidden passphrase prompt uses /dev/tty, independently of SQL stdin.\n"
@@ -389,6 +390,11 @@ void murmur_tool_init(void) {
 }
 
 int main(int argc, char **argv) {
+  if (argc > 1 && !strcmp(argv[1], "--admin")) {
+    int rc = murmur_admin_main(argc - 1, argv + 1);
+    murmur_shutdown();
+    return rc;
+  }
   int count = 1;
   atexit(clear_key);
   for (int i = 1; i < argc; ++i) {

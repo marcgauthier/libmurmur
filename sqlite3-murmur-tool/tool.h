@@ -8,4 +8,6 @@ int murmur_tool_status(int status);
 void murmur_tool_exit_code(int status);
 int murmur_tool_exiting(void);
 
+int murmur_admin_main(int argc, char **argv);
+
 #endif
