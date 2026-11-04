@@ -10,6 +10,7 @@
 #include "config.h"
 #include "bridge_peer.h"
 extern int bridge_peer_finish_files(sqlite3 *,murmur_files_t *,int (*stop)(void *),void *);
+#include "driver_internal.h"
 #include "member.h"
 #include "mbedtls/pem.h"
 #include "retain.h"
@@ -1151,8 +1152,62 @@ static void dial_begin(murmur_driver_t *d, const char *addr) {
   pthread_mutex_unlock(&d->mu);
 }
 
-/* Ends a dial attempt with a 5s cooldown against hot redial. */
-static void dial_end(murmur_driver_t *d, const char *addr) {
+/* Exponential backoff for repeated dial failures against one address:
+ * 5s base, doubling per consecutive failure, capped at 7 doublings
+ * (640s raw), then hard-capped at 300s (5min) so a peer that comes
+ * back is eventually retried. +/-25% jitter (derived from `seed`,
+ * splitmix64-style) avoids many nodes (or many cooling addresses on
+ * one node) resyncing their redial timing on the same wall-clock
+ * tick. Pure function of (fail_count, seed): no clock reads or
+ * global PRNG state, so it is directly unit-testable and safe to
+ * call from any thread without synchronization. */
+uint64_t dial_backoff_ms(uint32_t fail_count, uint64_t seed) {
+  if (fail_count == 0) {
+    return 5000;
+  }
+  uint32_t shift = fail_count - 1;
+  if (shift > 7) {
+    shift = 7;
+  }
+  uint64_t base = 5000ULL << shift;
+  if (base > 300000ULL) {
+    base = 300000ULL;
+  }
+  /* splitmix64 mix: cheap, deterministic, decent avalanche. */
+  uint64_t z = seed + 0x9E3779B97F4A7C15ULL;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  z = z ^ (z >> 31);
+  int64_t span = (int64_t)(base / 4); /* +/-25% of base, each side */
+  int64_t jitter = span > 0 ? (int64_t)(z % (uint64_t)(2 * span + 1)) - span : 0;
+  int64_t jittered = (int64_t)base + jitter;
+  if (jittered < 0) {
+    jittered = 0;
+  }
+  if (jittered > 300000) {
+    /* Jitter must never push the delay past the documented 5min hard
+     * cap, even for already-capped base values. */
+    jittered = 300000;
+  }
+  return (uint64_t)jittered;
+}
+
+/* Cheap FNV-1a hash of the dial address, mixed with the current wall
+ * clock, to seed dial_backoff_ms() jitter without shared PRNG state. */
+uint64_t dial_backoff_seed(const char *addr, uint64_t now_ms) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (const unsigned char *p = (const unsigned char *)addr; *p; p++) {
+    h ^= *p;
+    h *= 0x100000001b3ULL;
+  }
+  return h ^ now_ms;
+}
+
+/* Ends a dial attempt. On success the cooldown resets to the 5s base
+ * and the failure streak clears; on failure the streak grows and the
+ * cooldown window follows dial_backoff_ms() (capped, jittered) so a
+ * dead peer is not hammered at a fixed rate forever. */
+static void dial_end(murmur_driver_t *d, const char *addr, int success) {
   pthread_mutex_lock(&d->mu);
   for (size_t i = 0; i < d->n_dialing; i++) {
     if (strcmp(d->dialing[i], addr) == 0) {
@@ -1165,7 +1220,6 @@ static void dial_end(murmur_driver_t *d, const char *addr) {
       break;
     }
   }
-  uint64_t until = murmur_engine_wall_ms() + 5000;
   size_t slot = 0;
   for (; slot < d->n_cool; slot++) {
     if (strcmp(d->dial_cool[slot], addr) == 0) {
@@ -1180,6 +1234,19 @@ static void dial_end(murmur_driver_t *d, const char *addr) {
     }
     strncpy(d->dial_cool[slot], addr, 71);
     d->dial_cool[slot][71] = '\0';
+    /* New (or evicted-and-reused) slot: no failure history for this
+     * address yet. */
+    d->dial_fail_count[slot] = 0;
+  }
+  uint64_t now = murmur_engine_wall_ms();
+  uint64_t until;
+  if (success) {
+    d->dial_fail_count[slot] = 0;
+    until = now + 5000;
+  } else {
+    d->dial_fail_count[slot]++;
+    uint64_t seed = dial_backoff_seed(addr, now);
+    until = now + dial_backoff_ms(d->dial_fail_count[slot], seed);
   }
   d->dial_cool_until[slot] = until;
   pthread_mutex_unlock(&d->mu);
@@ -1211,7 +1278,7 @@ static void *dial_thread(void *v) {
   char ip[128];
   uint16_t port = 0;
   if (split_addr(a->addr, ip, sizeof(ip), &port) != 0) {
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1223,7 +1290,7 @@ static void *dial_thread(void *v) {
   if (!running || !q ||
       murmur_quic_dial(q, ip, port, NULL, &qs,
                        DRIVER_DIAL_TIMEOUT_MS) != 0) {
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1232,7 +1299,7 @@ static void *dial_thread(void *v) {
   if (murmur_session_peer(qs, &peer) != 0 || peer_is_self(d, &peer)) {
     murmur_session_close(qs);
     murmur_session_release(qs);
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1240,7 +1307,7 @@ static void *dial_thread(void *v) {
     /* Gossip claimed another node at this address: refuse the redirect. */
     murmur_session_close(qs);
     murmur_session_release(qs);
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1250,7 +1317,7 @@ static void *dial_thread(void *v) {
   if (dup) {
     murmur_session_close(qs);
     murmur_session_release(qs);
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1258,7 +1325,7 @@ static void *dial_thread(void *v) {
   if (murmur_session_open_stream(qs, &st) != 0) {
     murmur_session_close(qs);
     murmur_session_release(qs);
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1268,7 +1335,7 @@ static void *dial_thread(void *v) {
     murmur_stream_release(st);
     murmur_session_close(qs);
     murmur_session_release(qs);
-    dial_end(d, a->addr);
+    dial_end(d, a->addr, 0);
     free(a);
     return NULL;
   }
@@ -1282,7 +1349,7 @@ static void *dial_thread(void *v) {
   io.ctx = c;
   int rc = run_handshake(d, &peer, &io, 1);
   io_close(&io);
-  dial_end(d, a->addr);
+  dial_end(d, a->addr, rc == 0);
   free(a);
   if (rc != 0) {
     murmur_session_close(qs);
@@ -1522,7 +1589,7 @@ static void *sched_thread(void *v) {
       a->addr[sizeof(a->addr) - 1] = '\0';
       dial_begin(d, a->addr);
       if (spawn_detached(d, dial_thread, a) != 0) {
-        dial_end(d, a->addr);
+        dial_end(d, a->addr, 0);
         free(a);
       }
     }
@@ -1554,7 +1621,7 @@ static void *sched_thread(void *v) {
       a->addr[sizeof(a->addr) - 1] = '\0';
       dial_begin(d, a->addr);
       if (spawn_detached(d, dial_thread, a) != 0) {
-        dial_end(d, a->addr);
+        dial_end(d, a->addr, 0);
         free(a);
       }
     }
@@ -1911,6 +1978,7 @@ murmur_sync_status_t murmur_driver_stop(murmur_driver_t *d, int *sqlrc) {
   d->n_sess = d->cap_sess = 0;
   d->n_dialing = 0;
   d->n_cool = 0;
+  memset(d->dial_fail_count, 0, sizeof(d->dial_fail_count));
   pthread_mutex_unlock(&d->mu);
   for (size_t i = 0; i < n; i++) {
     murmur_driver_sess_t *s = all[i];

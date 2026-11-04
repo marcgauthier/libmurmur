@@ -89,6 +89,7 @@ struct murmur_driver {
   size_t n_dialing;
   char dial_cool[16][72];
   uint64_t dial_cool_until[16];
+  uint32_t dial_fail_count[16];
   size_t n_cool;
   murmur_files_t *files; /* owned when files_on */
   murmur_fetch_t *fetch; /* owned while running && files_on */

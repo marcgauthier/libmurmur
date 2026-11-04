@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "driver.h"
+#include "driver_internal.h"
 #include "engine.h"
 #include "serve.h"
 #include "sqlite3.h"
@@ -234,7 +235,77 @@ static int fmem_write(void *ctx, const uint8_t *buf, size_t n) {
   return 0;
 }
 
+/* Suite 0: dial_backoff_ms pure-function unit tests (no network, no
+ * live drivers needed). Covers the exponential-backoff behavior
+ * added to guard against hammering an unreachable peer. */
+static void test_dial_backoff(void) {
+  /* fail_count==0 is the "just succeeded / no history" base window:
+   * always exactly 5000ms, no jitter applied. */
+  CHECK(dial_backoff_ms(0, 0) == 5000, "fail_count=0 base is exactly 5000ms");
+  CHECK(dial_backoff_ms(0, 123456789) == 5000,
+        "fail_count=0 base ignores seed");
+
+  /* Monotonic growth: the un-jittered center value should double per
+   * failure. We can't read the center directly, but repeated seeds
+   * sampled across a wide range should keep the *average* envelope
+   * growing; more directly, verify every value stays within the
+   * expected [center*0.75, center*1.25] band for several seeds. */
+  uint64_t centers[] = {5000, 10000, 20000, 40000, 80000,
+                        160000, 300000 /* capped from 320000 */,
+                        300000 /* capped from 640000 */};
+  for (uint32_t fc = 1; fc <= 8; fc++) {
+    uint64_t center = centers[fc - 1];
+    uint64_t lo = center - center / 4;
+    uint64_t hi = center + center / 4;
+    if (hi > 300000) {
+      hi = 300000; /* jitter never exceeds the documented hard cap */
+    }
+    for (uint64_t seed = 0; seed < 5; seed++) {
+      uint64_t v = dial_backoff_ms(fc, seed * 0x1111111111ULL + fc);
+      CHECK(v >= lo && v <= hi,
+            "fail_count=%u seed=%llu value %llu within [%llu,%llu]", fc,
+            (unsigned long long)seed, (unsigned long long)v,
+            (unsigned long long)lo, (unsigned long long)hi);
+    }
+  }
+
+  /* Cap: large fail counts must never exceed 300000ms (5min), even
+   * with jitter, and must never go negative/underflow. */
+  for (uint32_t fc = 9; fc <= 1000; fc += 97) {
+    uint64_t v = dial_backoff_ms(fc, fc * 0x9E3779B1ULL);
+    CHECK(v <= 300000, "fail_count=%u capped value %llu <= 300000", fc,
+          (unsigned long long)v);
+  }
+
+  /* Jitter actually varies across seeds for a fixed fail_count (not
+   * a no-op), which is what prevents synchronized thundering-herd
+   * redials. */
+  uint64_t v1 = dial_backoff_ms(4, 1);
+  uint64_t v2 = dial_backoff_ms(4, 2);
+  uint64_t v3 = dial_backoff_ms(4, 3);
+  CHECK(!(v1 == v2 && v2 == v3),
+        "jitter varies across seeds (got %llu,%llu,%llu)",
+        (unsigned long long)v1, (unsigned long long)v2,
+        (unsigned long long)v3);
+
+  /* Determinism: same (fail_count, seed) always yields the same
+   * delay, so the function is safe to call without locking. */
+  CHECK(dial_backoff_ms(4, 42) == dial_backoff_ms(4, 42),
+        "pure function is deterministic for a fixed (fail_count, seed)");
+
+  /* dial_backoff_seed: different addresses or different times should
+   * (almost always) produce different seeds, and is itself pure. */
+  uint64_t s1 = dial_backoff_seed("127.0.0.1:9001", 1000);
+  uint64_t s2 = dial_backoff_seed("127.0.0.1:9002", 1000);
+  uint64_t s3 = dial_backoff_seed("127.0.0.1:9001", 2000);
+  CHECK(s1 != s2, "different addresses yield different seeds");
+  CHECK(s1 != s3, "different timestamps yield different seeds");
+  CHECK(dial_backoff_seed("127.0.0.1:9001", 1000) == s1,
+        "dial_backoff_seed is deterministic");
+}
+
 int main(int argc, char **argv) {
+  test_dial_backoff();
   const char *td = argc > 1 ? argv[1] : "deps/murmur/testdata";
   int base = argc > 2 ? atoi(argv[2]) : 17443;
   const char *group = "07070707070707070707070707070707";
@@ -520,7 +591,7 @@ int main(int argc, char **argv) {
   node_down(&a);
   node_down(&b);
   if (failures == 0) {
-    printf("DRIVER-OK (6 suites)\n");
+    printf("DRIVER-OK (7 suites)\n");
     return 0;
   }
   printf("DRIVER-FAIL (%d)\n", failures);
