@@ -89,7 +89,12 @@ add_custom_command(TARGET murmur POST_BUILD
   COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DARCHIVE=$<TARGET_FILE:murmur>"
     "-DROCKSDB=$<TARGET_FILE:rocksdb>" "-DCRYPTO=$<TARGET_FILE:crypto>"
     "-DCRSQL=${MURMUR_CRSQL_ARCHIVE}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/merge_archive.cmake" VERBATIM)
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/merge_archive.cmake"
+  COMMAND "${CMAKE_COMMAND}" "-DARCHIVE=$<TARGET_FILE:murmur>"
+    "-DNM=${CMAKE_NM}" "-DOBJCOPY=${CMAKE_OBJCOPY}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/isolate_crypto.cmake" VERBATIM)
+set_property(TARGET murmur APPEND PROPERTY LINK_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/isolate_crypto.cmake")
 option(MURMUR_BUILD_SQLITE_SHELL "Build the encrypted SQLite shell (requires patch)" ON)
 if(MURMUR_BUILD_SQLITE_SHELL)
   add_subdirectory(sqlite3-murmur-tool)
@@ -103,3 +108,8 @@ add_executable(murmur-test-crypto-policy tests/native/crypto_policy.c)
 target_include_directories(murmur-test-crypto-policy PRIVATE deps/codec deps/keyring)
 target_link_libraries(murmur-test-crypto-policy PRIVATE murmur::murmur)
 add_test(NAME crypto-policy COMMAND murmur-test-crypto-policy)
+
+# A host crypto implementation must neither collide with nor replace ours.
+add_executable(murmur-test-crypto-isolation tests/native/crypto_isolation.c)
+target_link_libraries(murmur-test-crypto-isolation PRIVATE murmur::murmur)
+add_test(NAME crypto-isolation COMMAND murmur-test-crypto-isolation)

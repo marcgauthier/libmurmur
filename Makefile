@@ -21,6 +21,9 @@ CC      ?= cc
 .DEFAULT_GOAL := all
 CXX     ?= c++
 AR      ?= ar
+NM      ?= nm
+OBJCOPY ?= objcopy
+CMAKE   ?= cmake
 BUILD   := build
 LIB     := libmurmur.a
 
@@ -494,13 +497,14 @@ ROCKSDB_A  := deps/rocksdb/lib/librocksdb.a
 CRSQL_A    := deps/crsqlite/lib/libcrsql_bundle_isolated.a
 AWSLC_A    := deps/aws-lc/lib/libcrypto.a
 
-$(LIB): $(OBJS) $(ROCKSDB_A) $(CRSQL_A) $(AWSLC_A)
+$(LIB): $(OBJS) $(ROCKSDB_A) $(CRSQL_A) $(AWSLC_A) cmake/isolate_crypto.cmake
 	@(echo 'create $@'; \
 	  for o in $(OBJS); do echo "addmod $$o"; done; \
 	  echo 'addlib $(abspath $(ROCKSDB_A))'; \
 	  echo 'addlib $(abspath $(CRSQL_A))'; \
 	  echo 'addlib $(abspath $(AWSLC_A))'; \
 	  echo 'save'; echo 'end') | $(AR) -M
+	$(CMAKE) -DARCHIVE=$(abspath $@) -DNM=$(NM) -DOBJCOPY=$(OBJCOPY) -P cmake/isolate_crypto.cmake
 
 -include $(OBJS:.o=.d)
 
@@ -581,3 +585,9 @@ go-vet: $(LIB)
 
 xcheck: $(LIB)
 	sh clients/go/tools/format_xcheck.sh
+
+$(BUILD)/crypto-isolation-test: $(LIB) tests/native/crypto_isolation.c
+	$(CC) $(OPT) tests/native/crypto_isolation.c $(LIB) -lstdc++ -lm -ldl -lpthread -o $@
+.PHONY: crypto-isolation-check
+crypto-isolation-check: $(BUILD)/crypto-isolation-test
+	./$(BUILD)/crypto-isolation-test
